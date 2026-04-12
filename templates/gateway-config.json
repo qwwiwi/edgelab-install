@@ -1,0 +1,16 @@
+{
+  "_comment": "EdgeLab AI Agent -- Telegram Gateway Config",
+  "poll_interval_sec": 2,
+  "allowlist_user_ids": [],
+  "agents": {
+    "agent": {
+      "enabled": true,
+      "telegram_bot_token_file": "~/claude-gateway/secrets/bot-token",
+      "workspace": "~/.claude",
+      "model": "sonnet",
+      "timeout_sec": 300,
+      "streaming_mode": "partial",
+      "system_reminder": ""
+    }
+  }
+}
