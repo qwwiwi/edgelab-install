@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="1.2.0"
+readonly EDGELAB_VERSION="1.3.0"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -47,13 +47,21 @@ error() { echo "${COLOR_RED}[ERROR]${COLOR_RESET} $*" >&2; }
 step()  { echo ""; echo "${COLOR_CYAN}${COLOR_BOLD}[$1/${TOTAL_STEPS}]${COLOR_RESET} $2"; }
 
 # ---------------------------------------------------------------------------
+# apt wrapper — waits for dpkg lock (fresh VPS: unattended-upgrades)
+# ---------------------------------------------------------------------------
+
+apt_get() {
+    apt-get -o DPkg::Lock::Timeout=120 "$@"
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup trap
 # ---------------------------------------------------------------------------
 
 TMPFILES=()
 cleanup() {
     for f in "${TMPFILES[@]:-}"; do
-        [[ -f "$f" ]] && rm -f "$f"
+        [[ -f "$f" ]] && rm -f "$f" || true
     done
 }
 trap cleanup EXIT
@@ -144,7 +152,10 @@ install_system_packages() {
 
     export DEBIAN_FRONTEND=noninteractive
 
-    apt-get update -qq
+    # Stop unattended-upgrades to avoid apt lock on fresh VPS
+    systemctl stop unattended-upgrades 2>/dev/null || true
+
+    apt_get update -qq
 
     local pkgs=(
         curl wget git jq htop tmux
@@ -157,7 +168,7 @@ install_system_packages() {
         python3-pip
     )
 
-    apt-get install -y -qq "${pkgs[@]}"
+    apt_get install -y -qq "${pkgs[@]}"
     info "System packages installed."
 }
 
@@ -190,8 +201,8 @@ install_nodejs() {
     echo "deb [signed-by=${keyring}] https://deb.nodesource.com/node_${NODESOURCE_MAJOR}.x nodistro main" \
         > "$node_list"
 
-    apt-get update -qq
-    apt-get install -y -qq nodejs
+    apt_get update -qq
+    apt_get install -y -qq nodejs
 
     info "Node.js $(node -v) installed."
 }
@@ -207,15 +218,17 @@ install_python() {
         local py_minor
         py_minor=$(python3 -c 'import sys; print(sys.version_info.minor)')
         if [[ "$py_minor" -ge "$PYTHON_MIN_MINOR" ]]; then
-            info "Python 3.${py_minor} found — skipping."
+            # Ensure venv is available (minimal Ubuntu 24.04 may lack it)
+            apt_get install -y -qq python3-venv 2>/dev/null || true
+            info "Python 3.${py_minor} found — ensured venv support."
             return 0
         fi
     fi
 
     info "Installing Python 3.${PYTHON_MIN_MINOR} via deadsnakes PPA..."
     add-apt-repository -y ppa:deadsnakes/ppa
-    apt-get update -qq
-    apt-get install -y -qq \
+    apt_get update -qq
+    apt_get install -y -qq \
         "python3.${PYTHON_MIN_MINOR}" \
         "python3.${PYTHON_MIN_MINOR}-venv" \
         "python3.${PYTHON_MIN_MINOR}-dev"
@@ -226,7 +239,7 @@ install_python() {
     update-alternatives --set python3 "/usr/bin/python3.${PYTHON_MIN_MINOR}"
 
     # Install pip for the new python version
-    apt-get install -y -qq "python3.${PYTHON_MIN_MINOR}-distutils" 2>/dev/null || true
+    apt_get install -y -qq "python3.${PYTHON_MIN_MINOR}-distutils" 2>/dev/null || true
     "python3.${PYTHON_MIN_MINOR}" -m ensurepip --upgrade 2>/dev/null || true
 
     info "Python 3.${PYTHON_MIN_MINOR} installed and set as default."
@@ -322,7 +335,9 @@ install_gateway() {
 
 install_gateway_config() {
     local config_file="$1"
-    cat > "$config_file" << 'GWEOF'
+    # Use unquoted heredoc so ${REAL_HOME} expands to absolute paths
+    # json.load() does NOT expand ~ — absolute paths are required
+    cat > "$config_file" << GWEOF
 {
   "_comment": "EdgeLab AI Agent -- Telegram Gateway Config",
   "poll_interval_sec": 2,
@@ -330,8 +345,8 @@ install_gateway_config() {
   "agents": {
     "agent": {
       "enabled": true,
-      "telegram_bot_token_file": "~/claude-gateway/secrets/bot-token",
-      "workspace": "~/.claude",
+      "telegram_bot_token_file": "${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets/bot-token",
+      "workspace": "${REAL_HOME}/.claude",
       "model": "sonnet",
       "timeout_sec": 300,
       "streaming_mode": "partial",
@@ -407,8 +422,8 @@ install_caddy() {
     echo "deb [signed-by=${keyring}] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
         > "$caddy_list"
 
-    apt-get update -qq
-    apt-get install -y -qq caddy
+    apt_get update -qq
+    apt_get install -y -qq caddy
 
     info "Caddy $(caddy version 2>/dev/null || echo '') installed."
 }
