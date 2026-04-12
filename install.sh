@@ -10,13 +10,12 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="1.1.0"
+readonly EDGELAB_VERSION="1.2.0"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly GATEWAY_DIR_NAME="claude-gateway"
 readonly TOTAL_STEPS=9
-readonly TEMPLATE_BASE="https://raw.githubusercontent.com/qwwiwi/edgelab-install/main/templates"
 
 # ---------------------------------------------------------------------------
 # Terminal colors (tput-safe)
@@ -122,7 +121,7 @@ detect_real_user() {
         fi
         REAL_USER="$svc_user"
     fi
-    REAL_HOME=$(eval echo "~${REAL_USER}")
+    REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
     readonly REAL_USER REAL_HOME
     info "Installing for user: ${REAL_USER} (home: ${REAL_HOME})"
 }
@@ -155,6 +154,7 @@ install_system_packages() {
         apt-transport-https
         ca-certificates
         gnupg
+        python3-pip
     )
 
     apt-get install -y -qq "${pkgs[@]}"
@@ -220,13 +220,16 @@ install_python() {
         "python3.${PYTHON_MIN_MINOR}-venv" \
         "python3.${PYTHON_MIN_MINOR}-dev"
 
-    # Set as default python3 only if no python3 exists
-    if ! command -v python3 &>/dev/null; then
-        update-alternatives --install /usr/bin/python3 python3 \
-            "/usr/bin/python3.${PYTHON_MIN_MINOR}" 1
-    fi
+    # Always register python3.12 as an alternative and set it as default
+    update-alternatives --install /usr/bin/python3 python3 \
+        "/usr/bin/python3.${PYTHON_MIN_MINOR}" 2
+    update-alternatives --set python3 "/usr/bin/python3.${PYTHON_MIN_MINOR}"
 
-    info "Python 3.${PYTHON_MIN_MINOR} installed."
+    # Install pip for the new python version
+    apt-get install -y -qq "python3.${PYTHON_MIN_MINOR}-distutils" 2>/dev/null || true
+    "python3.${PYTHON_MIN_MINOR}" -m ensurepip --upgrade 2>/dev/null || true
+
+    info "Python 3.${PYTHON_MIN_MINOR} installed and set as default."
 }
 
 # ---------------------------------------------------------------------------
@@ -246,13 +249,23 @@ install_claude_code() {
 
     # Official native installer — installs to ~/.local/bin/claude (user space)
     # MUST run as non-root user; npm method is deprecated
+    # Download first, then execute — so curl errors are caught
     info "Installing via official Anthropic installer..."
-    as_user "curl -fsSL https://claude.ai/install.sh | sh"
+    local installer_tmp
+    installer_tmp=$(mktemp)
+    TMPFILES+=("$installer_tmp")
+
+    curl -fsSL https://claude.ai/install.sh -o "$installer_tmp" \
+        || { error "Failed to download Claude Code installer."; exit 1; }
+
+    # Make readable by the target user and execute
+    chmod 644 "$installer_tmp"
+    as_user "sh ${installer_tmp}"
 
     # Verify installation
-    if as_user "test -x '${claude_bin}'"; then
+    if [[ -x "${claude_bin}" ]]; then
         local ver
-        ver=$(as_user "'${claude_bin}' --version" 2>/dev/null || echo "unknown")
+        ver=$(as_user "${claude_bin} --version" 2>/dev/null || echo "unknown")
         info "Claude Code CLI v${ver} installed at ${claude_bin}"
     else
         error "Claude Code installation failed — ${claude_bin} not found."
@@ -294,9 +307,13 @@ install_gateway() {
         info "Gateway config already exists — not overwriting."
     fi
 
-    # Install Python dependencies if requirements.txt exists
+    # Install Python dependencies in a venv (avoids PEP 668 conflicts)
     if [[ -f "${gateway_dir}/requirements.txt" ]]; then
-        as_user "cd '${gateway_dir}' && python3 -m pip install -r requirements.txt --quiet" \
+        local venv_dir="${gateway_dir}/.venv"
+        if [[ ! -d "$venv_dir" ]]; then
+            as_user "python3 -m venv '${venv_dir}'"
+        fi
+        as_user "'${venv_dir}/bin/pip' install -r '${gateway_dir}/requirements.txt' --quiet" \
             || warn "Failed to install gateway Python deps — install manually."
     fi
 
@@ -403,16 +420,22 @@ install_caddy() {
 configure_security() {
     step 8 "Configuring firewall and fail2ban..."
 
-    # UFW
+    # UFW — add rules incrementally, never reset existing rules
     if command -v ufw &>/dev/null; then
-        ufw --force reset >/dev/null 2>&1 || true
-        ufw default deny incoming >/dev/null
-        ufw default allow outgoing >/dev/null
-        ufw allow 22/tcp comment "SSH" >/dev/null
-        ufw allow 80/tcp comment "HTTP" >/dev/null
-        ufw allow 443/tcp comment "HTTPS" >/dev/null
-        ufw --force enable >/dev/null
-        info "UFW configured: allow 22, 80, 443."
+        ufw default deny incoming >/dev/null 2>&1 || true
+        ufw default allow outgoing >/dev/null 2>&1 || true
+
+        # Detect actual SSH port to avoid lockout
+        local ssh_port
+        ssh_port=$(grep -E '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null \
+            | awk '{print $2}' | head -1)
+        ssh_port="${ssh_port:-22}"
+
+        ufw allow "${ssh_port}/tcp" comment "SSH" >/dev/null 2>&1 || true
+        ufw allow 80/tcp comment "HTTP" >/dev/null 2>&1 || true
+        ufw allow 443/tcp comment "HTTPS" >/dev/null 2>&1 || true
+        ufw --force enable >/dev/null 2>&1 || true
+        info "UFW configured: allow ${ssh_port} (SSH), 80, 443."
     else
         warn "ufw not found — skipping firewall setup."
     fi
@@ -463,7 +486,7 @@ Type=simple
 User=${REAL_USER}
 Group=${REAL_USER}
 WorkingDirectory=${REAL_HOME}/${GATEWAY_DIR_NAME}
-ExecStart=/usr/bin/python3 ${REAL_HOME}/${GATEWAY_DIR_NAME}/gateway.py
+ExecStart=${REAL_HOME}/${GATEWAY_DIR_NAME}/.venv/bin/python ${REAL_HOME}/${GATEWAY_DIR_NAME}/gateway.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
