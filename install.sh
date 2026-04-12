@@ -13,10 +13,10 @@ set -euo pipefail
 readonly EDGELAB_VERSION="1.0.0"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
-readonly GATEWAY_REPO="https://github.com/jasonqween/jarvis-telegram-gateway.git"
+readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly GATEWAY_DIR_NAME="claude-gateway"
 readonly TOTAL_STEPS=9
-readonly TEMPLATE_BASE="https://raw.githubusercontent.com/jasonqween/edgelab-install/main/templates"
+readonly TEMPLATE_BASE="https://raw.githubusercontent.com/qwwiwi/edgelab-install/main/templates"
 
 # ---------------------------------------------------------------------------
 # Terminal colors (tput-safe)
