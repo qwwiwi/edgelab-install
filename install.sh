@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="1.0.0"
+readonly EDGELAB_VERSION="1.1.0"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -114,19 +114,25 @@ detect_real_user() {
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         REAL_USER="$SUDO_USER"
     else
-        REAL_USER="root"
+        # Running as root directly — create a dedicated service user
+        local svc_user="edgelab"
+        if ! id "$svc_user" &>/dev/null; then
+            info "Creating service user '${svc_user}'..."
+            useradd -m -s /bin/bash "$svc_user"
+        fi
+        REAL_USER="$svc_user"
     fi
     REAL_HOME=$(eval echo "~${REAL_USER}")
     readonly REAL_USER REAL_HOME
     info "Installing for user: ${REAL_USER} (home: ${REAL_HOME})"
 }
 
-# Run a command as the real user
+# Run a command as the real (non-root) user
 as_user() {
-    if [[ "$REAL_USER" == "root" ]]; then
-        "$@"
-    else
+    if [[ "$(id -u)" -eq 0 && "$REAL_USER" != "root" ]]; then
         su - "$REAL_USER" -c "$*"
+    else
+        "$@"
     fi
 }
 
@@ -230,12 +236,29 @@ install_python() {
 install_claude_code() {
     step 4 "Installing Claude Code CLI..."
 
-    if command -v claude &>/dev/null; then
-        info "Claude Code CLI already installed — updating."
+    local claude_bin="${REAL_HOME}/.local/bin/claude"
+
+    if [[ -x "$claude_bin" ]]; then
+        info "Claude Code CLI already installed at ${claude_bin} — updating."
+        as_user "claude update" || true
+        return 0
     fi
 
-    npm install -g @anthropic-ai/claude-code --loglevel=error
-    info "Claude Code CLI $(claude --version 2>/dev/null || echo 'installed')."
+    # Official native installer — installs to ~/.local/bin/claude (user space)
+    # MUST run as non-root user; npm method is deprecated
+    info "Installing via official Anthropic installer..."
+    as_user "curl -fsSL https://claude.ai/install.sh | sh"
+
+    # Verify installation
+    if as_user "test -x '${claude_bin}'"; then
+        local ver
+        ver=$(as_user "'${claude_bin}' --version" 2>/dev/null || echo "unknown")
+        info "Claude Code CLI v${ver} installed at ${claude_bin}"
+    else
+        error "Claude Code installation failed — ${claude_bin} not found."
+        error "Try installing manually as ${REAL_USER}: curl -fsSL https://claude.ai/install.sh | sh"
+        exit 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -447,7 +470,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=claude-gateway
 Environment=HOME=${REAL_HOME}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH=${REAL_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target
@@ -474,7 +497,8 @@ BANNER
     cat << EOF
 Next steps:
 
-1. Authorize Claude Code:
+1. Switch to your user and authorize Claude Code:
+   su - ${REAL_USER}
    claude
 
 2. Configure the Telegram bot:
