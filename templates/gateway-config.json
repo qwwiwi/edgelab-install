@@ -5,8 +5,8 @@
   "agents": {
     "agent": {
       "enabled": true,
-      "telegram_bot_token_file": "~/claude-gateway/secrets/bot-token",
-      "workspace": "~/.claude",
+      "telegram_bot_token_file": "/home/REPLACE_USER/claude-gateway/secrets/bot-token",
+      "workspace": "/home/REPLACE_USER/.claude",
       "model": "opus",
       "timeout_sec": 300,
       "streaming_mode": "partial",

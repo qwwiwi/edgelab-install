@@ -373,6 +373,22 @@ setup_workspace() {
         chown "${REAL_USER}:${REAL_USER}" "$claude_dir"
     fi
 
+    # Create settings.json with recommended 400K context window
+    local settings_json="${claude_dir}/settings.json"
+    if [[ ! -f "$settings_json" ]]; then
+        cat > "$settings_json" << 'SJEOF'
+{
+  "env": {
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000"
+  }
+}
+SJEOF
+        chown "${REAL_USER}:${REAL_USER}" "$settings_json"
+        info "settings.json written (400K context window)."
+    else
+        info "settings.json already exists — not overwriting."
+    fi
+
     if [[ ! -f "$claude_md" ]]; then
         cat > "$claude_md" << 'CLEOF'
 # My AI Agent
@@ -546,6 +562,7 @@ Next steps:
 
    Save the token:
    echo "YOUR_BOT_TOKEN" > ~/${GATEWAY_DIR_NAME}/secrets/bot-token
+   chmod 600 ~/${GATEWAY_DIR_NAME}/secrets/bot-token
 
 3. Start the gateway:
    sudo systemctl start claude-gateway
