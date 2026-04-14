@@ -7,7 +7,7 @@
       "enabled": true,
       "telegram_bot_token_file": "~/claude-gateway/secrets/bot-token",
       "workspace": "~/.claude",
-      "model": "sonnet",
+      "model": "opus",
       "timeout_sec": 300,
       "streaming_mode": "partial",
       "system_reminder": ""

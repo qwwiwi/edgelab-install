@@ -347,7 +347,7 @@ install_gateway_config() {
       "enabled": true,
       "telegram_bot_token_file": "${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets/bot-token",
       "workspace": "${REAL_HOME}/.claude",
-      "model": "sonnet",
+      "model": "opus",
       "timeout_sec": 300,
       "streaming_mode": "partial",
       "system_reminder": ""
