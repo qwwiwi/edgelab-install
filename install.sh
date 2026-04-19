@@ -273,7 +273,7 @@ install_claude_code() {
 
     # Make readable by the target user and execute
     chmod 644 "$installer_tmp"
-    as_user "sh ${installer_tmp}"
+    as_user "bash ${installer_tmp}"
 
     # Verify installation
     if [[ -x "${claude_bin}" ]]; then
@@ -282,7 +282,7 @@ install_claude_code() {
         info "Claude Code CLI v${ver} installed at ${claude_bin}"
     else
         error "Claude Code installation failed — ${claude_bin} not found."
-        error "Try installing manually as ${REAL_USER}: curl -fsSL https://claude.ai/install.sh | sh"
+        error "Try installing manually as ${REAL_USER}: curl -fsSL https://claude.ai/install.sh | bash"
         exit 1
     fi
 }
