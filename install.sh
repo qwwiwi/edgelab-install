@@ -4,18 +4,20 @@ set -euo pipefail
 # EdgeLab AI Agent — Quick Start Installer
 # https://edgelab.su
 # Usage: curl -fsSL https://edgelab.su/install | bash
-# Supports: Ubuntu 22.04 / 24.04, amd64 / arm64
+# Supports: Ubuntu 22.04 / 24.04 / 25.04, amd64 / arm64
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="1.3.0"
+readonly EDGELAB_VERSION="2.0.0"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly GATEWAY_DIR_NAME="claude-gateway"
-readonly TOTAL_STEPS=9
+readonly GROQ_API_URL="https://api.groq.com/openai/v1/audio/transcriptions"
+readonly OV_PYPI_PKG="openviking"
+readonly TOTAL_STEPS=12
 
 # ---------------------------------------------------------------------------
 # Terminal colors (tput-safe)
@@ -87,10 +89,10 @@ preflight() {
             warn "Proceeding anyway — some steps may fail."
         else
             case "${VERSION_ID:-}" in
-                22.04|24.04) info "Detected Ubuntu ${VERSION_ID}" ;;
+                22.04|24.04|25.04) info "Detected Ubuntu ${VERSION_ID}" ;;
                 *)
                     warn "Detected Ubuntu ${VERSION_ID:-unknown}."
-                    warn "Only 22.04 and 24.04 are officially supported."
+                    warn "Only 22.04, 24.04 and 25.04 are officially supported."
                     ;;
             esac
         fi
@@ -152,8 +154,12 @@ install_system_packages() {
 
     export DEBIAN_FRONTEND=noninteractive
 
-    # Stop unattended-upgrades to avoid apt lock on fresh VPS
-    systemctl stop unattended-upgrades 2>/dev/null || true
+    # Temporarily stop unattended-upgrades to avoid apt lock on fresh VPS
+    # Do NOT disable -- automatic security updates are important
+    if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
+        systemctl stop unattended-upgrades 2>/dev/null || true
+        info "Temporarily stopped unattended-upgrades (will restart after install)."
+    fi
 
     apt_get update -qq
 
@@ -233,16 +239,12 @@ install_python() {
         "python3.${PYTHON_MIN_MINOR}-venv" \
         "python3.${PYTHON_MIN_MINOR}-dev"
 
-    # Always register python3.12 as an alternative and set it as default
-    update-alternatives --install /usr/bin/python3 python3 \
-        "/usr/bin/python3.${PYTHON_MIN_MINOR}" 2
-    update-alternatives --set python3 "/usr/bin/python3.${PYTHON_MIN_MINOR}"
-
-    # Install pip for the new python version
+    # Do NOT override system python3 -- distro tools depend on it.
+    # Use python3.12 explicitly in venv creation instead.
     apt_get install -y -qq "python3.${PYTHON_MIN_MINOR}-distutils" 2>/dev/null || true
     "python3.${PYTHON_MIN_MINOR}" -m ensurepip --upgrade 2>/dev/null || true
 
-    info "Python 3.${PYTHON_MIN_MINOR} installed and set as default."
+    info "Python 3.${PYTHON_MIN_MINOR} installed (system python3 unchanged)."
 }
 
 # ---------------------------------------------------------------------------
@@ -324,7 +326,12 @@ install_gateway() {
     if [[ -f "${gateway_dir}/requirements.txt" ]]; then
         local venv_dir="${gateway_dir}/.venv"
         if [[ ! -d "$venv_dir" ]]; then
-            as_user "python3 -m venv '${venv_dir}'"
+            # Use python3.12 if available (deadsnakes), otherwise system python3
+            local py_cmd="python3"
+            if command -v "python3.${PYTHON_MIN_MINOR}" &>/dev/null; then
+                py_cmd="python3.${PYTHON_MIN_MINOR}"
+            fi
+            as_user "${py_cmd} -m venv '${venv_dir}'"
         fi
         as_user "'${venv_dir}/bin/pip' install -r '${gateway_dir}/requirements.txt' --quiet" \
             || warn "Failed to install gateway Python deps — install manually."
@@ -346,6 +353,7 @@ install_gateway_config() {
     "agent": {
       "enabled": true,
       "telegram_bot_token_file": "${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets/bot-token",
+      "groq_api_key_file": "${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets/groq-api-key",
       "workspace": "${REAL_HOME}/.claude",
       "model": "opus",
       "timeout_sec": 300,
@@ -536,6 +544,308 @@ SVCEOF
 }
 
 # ---------------------------------------------------------------------------
+# Step 10: Groq voice transcription
+# ---------------------------------------------------------------------------
+
+setup_groq() {
+    step 10 "Setting up Groq voice transcription..."
+
+    local secrets_dir="${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets"
+    local groq_key_file="${secrets_dir}/groq-api-key"
+
+    if [[ -f "$groq_key_file" ]]; then
+        info "Groq API key already configured -- skipping."
+        return 0
+    fi
+
+    echo ""
+    echo "Groq provides free voice transcription (Whisper) for your agent."
+    echo "Get a free API key at: https://console.groq.com/keys"
+    echo ""
+
+    local groq_key=""
+    # Must read from /dev/tty -- stdin may be a pipe in curl|bash mode
+    read -rsp "Groq API key (press Enter to skip): " groq_key < /dev/tty || true
+    echo ""
+
+    if [[ -z "$groq_key" ]]; then
+        warn "Groq skipped -- voice messages will not be transcribed."
+        warn "You can add the key later to: ${groq_key_file}"
+        return 0
+    fi
+
+    # Validate key format (starts with gsk_)
+    if [[ ! "$groq_key" =~ ^gsk_ ]]; then
+        warn "Key does not start with 'gsk_' -- saving anyway."
+    fi
+
+    echo "$groq_key" > "$groq_key_file"
+    chown "${REAL_USER}:${REAL_USER}" "$groq_key_file"
+    chmod 600 "$groq_key_file"
+
+    # Quick validation: test the key with a lightweight API call
+    # Pass key via temp file to avoid leaking in /proc/cmdline
+    local header_tmp
+    header_tmp=$(mktemp)
+    TMPFILES+=("$header_tmp")
+    echo "Authorization: Bearer ${groq_key}" > "$header_tmp"
+    chmod 600 "$header_tmp"
+    local http_code
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" \
+        -H @"${header_tmp}" \
+        "https://api.groq.com/openai/v1/models" 2>/dev/null || echo "000")
+    rm -f "$header_tmp"
+
+    if [[ "$http_code" == "200" ]]; then
+        info "Groq API key validated and saved."
+    else
+        warn "Groq API returned HTTP ${http_code} -- key saved, but verify it works."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 11: OpenViking semantic memory
+# ---------------------------------------------------------------------------
+
+setup_openviking() {
+    step 11 "Setting up OpenViking semantic memory..."
+
+    # Install openviking Python package in gateway venv
+    local venv_dir="${REAL_HOME}/${GATEWAY_DIR_NAME}/.venv"
+    if [[ -d "$venv_dir" ]]; then
+        as_user "'${venv_dir}/bin/pip' install ${OV_PYPI_PKG} --upgrade --quiet" \
+            || warn "Failed to install openviking -- install manually: pip install openviking"
+    else
+        warn "Gateway venv not found -- skipping OpenViking pip install."
+        warn "Install manually: pip install openviking"
+    fi
+
+    # Create OpenViking config directory
+    local ov_dir="${REAL_HOME}/.openviking"
+    if [[ ! -d "$ov_dir" ]]; then
+        mkdir -p "$ov_dir"
+        chown "${REAL_USER}:${REAL_USER}" "$ov_dir"
+    fi
+
+    # Write config template if not present
+    local ov_conf="${ov_dir}/ov.conf"
+    if [[ ! -f "$ov_conf" ]]; then
+        cat > "$ov_conf" << 'OVEOF'
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 1933,
+    "root_api_key": "CHANGE_ME"
+  },
+  "account": "default",
+  "user": "agent"
+}
+OVEOF
+        chown "${REAL_USER}:${REAL_USER}" "$ov_conf"
+        chmod 600 "$ov_conf"
+        info "OpenViking config template written to ${ov_conf}"
+        info "Edit ov.conf to set your root_api_key after starting OpenViking."
+    else
+        info "OpenViking config already exists -- not overwriting."
+    fi
+
+    # Create systemd service for OpenViking (only if binary exists)
+    local ov_service="/etc/systemd/system/openviking.service"
+    if [[ ! -f "$ov_service" ]] && [[ -x "${venv_dir}/bin/openviking" ]]; then
+        cat > "$ov_service" << OVSEOF
+[Unit]
+Description=OpenViking Semantic Memory Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${REAL_USER}
+Group=${REAL_USER}
+ExecStart=${venv_dir}/bin/openviking serve --config ${ov_dir}/ov.conf
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openviking
+Environment=HOME=${REAL_HOME}
+
+[Install]
+WantedBy=multi-user.target
+OVSEOF
+        systemctl daemon-reload
+        info "openviking.service installed (not started)."
+    else
+        info "openviking.service already exists -- not overwriting."
+    fi
+
+    info "OpenViking ready. Start with: sudo systemctl start openviking"
+}
+
+# ---------------------------------------------------------------------------
+# Step 12: Cron schedule for memory rotation
+# ---------------------------------------------------------------------------
+
+setup_cron() {
+    step 12 "Setting up memory rotation cron jobs..."
+
+    local scripts_dir="${REAL_HOME}/.claude/scripts"
+    if [[ ! -d "$scripts_dir" ]]; then
+        mkdir -p "$scripts_dir"
+        chown "${REAL_USER}:${REAL_USER}" "$scripts_dir"
+    fi
+
+    # Write memory rotation scripts
+    write_rotate_warm_script "$scripts_dir"
+    write_trim_hot_script "$scripts_dir"
+    write_compress_warm_script "$scripts_dir"
+
+    # Make scripts executable
+    chmod +x "${scripts_dir}/rotate-warm.sh" \
+              "${scripts_dir}/trim-hot.sh" \
+              "${scripts_dir}/compress-warm.sh"
+    chown -R "${REAL_USER}:${REAL_USER}" "$scripts_dir"
+
+    # Install crontab for the user
+    local cron_marker="# EdgeLab memory rotation"
+    local existing_cron
+    existing_cron=$(crontab -u "$REAL_USER" -l 2>/dev/null || echo "")
+
+    if echo "$existing_cron" | grep -q "$cron_marker"; then
+        info "Memory rotation cron already installed -- skipping."
+        return 0
+    fi
+
+    # Log to user's home, not /tmp (symlink attack risk)
+    local cron_log="${REAL_HOME}/.claude/logs/cron.log"
+    mkdir -p "$(dirname "$cron_log")"
+    chown "${REAL_USER}:${REAL_USER}" "$(dirname "$cron_log")"
+
+    local new_cron="${existing_cron}
+${cron_marker}
+30 4 * * * ${scripts_dir}/rotate-warm.sh >> ${cron_log} 2>&1
+0  5 * * * ${scripts_dir}/trim-hot.sh >> ${cron_log} 2>&1
+0  6 * * * ${scripts_dir}/compress-warm.sh >> ${cron_log} 2>&1
+"
+
+    echo "$new_cron" | crontab -u "$REAL_USER" -
+    info "3 memory rotation cron jobs installed for ${REAL_USER}."
+}
+
+write_rotate_warm_script() {
+    local dir="$1"
+    cat > "${dir}/rotate-warm.sh" << 'RWEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Rotate WARM memory: move decisions.md entries older than 14 days to MEMORY.md
+CLAUDE_DIR="${HOME}/.claude"
+DECISIONS="${CLAUDE_DIR}/decisions.md"
+MEMORY="${CLAUDE_DIR}/MEMORY.md"
+
+if [[ ! -f "$DECISIONS" ]]; then exit 0; fi
+
+CUTOFF=$(date -d "-14 days" +%Y-%m-%d 2>/dev/null || date -v-14d +%Y-%m-%d 2>/dev/null || exit 0)
+
+# Extract sections with dates, archive old ones
+tmp=$(mktemp)
+keep=$(mktemp)
+trap 'rm -f "$tmp" "$keep"' EXIT
+
+current_date=""
+current_section=""
+while IFS= read -r line; do
+    if [[ "$line" =~ ^##[[:space:]]([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+        if [[ -n "$current_date" ]]; then
+            if [[ "$current_date" < "$CUTOFF" ]]; then
+                echo "$current_section" >> "$tmp"
+            else
+                echo "$current_section" >> "$keep"
+            fi
+        fi
+        current_date="${BASH_REMATCH[1]}"
+        current_section="$line"
+    else
+        current_section="${current_section}
+${line}"
+    fi
+done < "$DECISIONS"
+
+# Handle last section
+if [[ -n "$current_date" ]]; then
+    if [[ "$current_date" < "$CUTOFF" ]]; then
+        echo "$current_section" >> "$tmp"
+    else
+        echo "$current_section" >> "$keep"
+    fi
+fi
+
+# Archive old entries
+if [[ -s "$tmp" ]]; then
+    echo "" >> "$MEMORY"
+    echo "## Archived from decisions.md ($(date +%Y-%m-%d))" >> "$MEMORY"
+    cat "$tmp" >> "$MEMORY"
+
+    # Rebuild decisions.md: keep everything before first ## YYYY-MM-DD + kept sections
+    awk '/^## [0-9]{4}-[0-9]{2}-[0-9]{2}/{exit} {print}' "$DECISIONS" > "${DECISIONS}.new"
+    cat "$keep" >> "${DECISIONS}.new"
+    mv "${DECISIONS}.new" "$DECISIONS"
+
+    echo "[rotate-warm] Archived $(grep -c '^##' "$tmp" || echo 0) sections"
+fi
+RWEOF
+}
+
+write_trim_hot_script() {
+    local dir="$1"
+    cat > "${dir}/trim-hot.sh" << 'THEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Trim HOT memory: keep only last 10 entries in handoff.md
+CLAUDE_DIR="${HOME}/.claude"
+HANDOFF="${CLAUDE_DIR}/handoff.md"
+
+if [[ ! -f "$HANDOFF" ]]; then exit 0; fi
+
+entry_count=$(grep -c '^### ' "$HANDOFF" 2>/dev/null || echo 0)
+if [[ "$entry_count" -le 10 ]]; then
+    exit 0
+fi
+
+# Keep header (first line) + last 10 entries
+header=$(head -1 "$HANDOFF")
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+
+# Extract last 10 entries (### markers)
+tac "$HANDOFF" | awk '/^### /{count++} count<=10{print}' | tac > "$tmp"
+
+echo "$header" > "$HANDOFF"
+echo "" >> "$HANDOFF"
+cat "$tmp" >> "$HANDOFF"
+
+echo "[trim-hot] Trimmed to last 10 entries (was ${entry_count})"
+THEOF
+}
+
+write_compress_warm_script() {
+    local dir="$1"
+    cat > "${dir}/compress-warm.sh" << 'CWEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Compress WARM memory: alert if decisions.md exceeds 10KB
+CLAUDE_DIR="${HOME}/.claude"
+DECISIONS="${CLAUDE_DIR}/decisions.md"
+
+if [[ ! -f "$DECISIONS" ]]; then exit 0; fi
+
+size=$(stat -f%z "$DECISIONS" 2>/dev/null || stat -c%s "$DECISIONS" 2>/dev/null || echo 0)
+if [[ "$size" -gt 10240 ]]; then
+    echo "[compress-warm] decisions.md is ${size} bytes (>10KB) -- consider running rotate-warm.sh"
+fi
+CWEOF
+}
+
+# ---------------------------------------------------------------------------
 # Final banner
 # ---------------------------------------------------------------------------
 
@@ -555,20 +865,33 @@ Next steps:
    su - ${REAL_USER}
    claude
 
-2. Configure the Telegram bot:
-   nano ~/${GATEWAY_DIR_NAME}/config.json
-   -- Insert the bot token from @BotFather
-   -- Specify your Telegram user ID
+2. Fill in your CLAUDE.md (agent personality):
+   nano ~/.claude/CLAUDE.md
 
-   Save the token:
+3. Configure the Telegram bot:
    echo "YOUR_BOT_TOKEN" > ~/${GATEWAY_DIR_NAME}/secrets/bot-token
    chmod 600 ~/${GATEWAY_DIR_NAME}/secrets/bot-token
 
-3. Start the gateway:
+   Set your Telegram user ID in config.json:
+   nano ~/${GATEWAY_DIR_NAME}/config.json
+
+4. Start the gateway:
    sudo systemctl start claude-gateway
    sudo systemctl enable claude-gateway
 
-4. Message your bot in Telegram -- the agent will respond
+5. (Optional) Configure Groq voice:
+   echo "gsk_YOUR_KEY" > ~/${GATEWAY_DIR_NAME}/secrets/groq-api-key
+   chmod 600 ~/${GATEWAY_DIR_NAME}/secrets/groq-api-key
+
+6. (Optional) Start OpenViking memory:
+   nano ~/.openviking/ov.conf   # set root_api_key
+   sudo systemctl start openviking
+   sudo systemctl enable openviking
+
+7. Message your bot in Telegram -- the agent will respond
+
+Installed: Claude Code, Telegram Gateway, Caddy, Groq, OpenViking, Cron
+Cron jobs: rotate-warm (04:30), trim-hot (05:00), compress-warm (06:00)
 
 Documentation: https://guides.edgelab.su
 Community:     https://edgelab.su
@@ -597,6 +920,12 @@ main() {
     install_caddy
     configure_security
     install_systemd_service
+    setup_groq
+    setup_openviking
+    setup_cron
+
+    # Re-enable unattended-upgrades if it was stopped
+    systemctl start unattended-upgrades 2>/dev/null || true
 
     print_banner
 }
