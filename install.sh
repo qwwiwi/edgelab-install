@@ -410,8 +410,16 @@ run_step() {
         info "Skipping '${name}' -- already completed."
         return 0
     fi
-    "$fn"
-    record_step "$name"
+    # F3: only record success. If step returns non-zero, state is NOT updated
+    # so the resume path retries the step.
+    local rc=0
+    "$fn" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_step "$name"
+    else
+        warn "Step '${name}' failed (rc=${rc}). State NOT recorded; will retry on resume."
+        return $rc
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1097,16 +1105,22 @@ authorize_claude() {
     else
         warn "No TTY available -- skipping interactive login."
         warn "Run 'claude login' manually as ${REAL_USER} when ready."
-        return 0
+        # F3: non-TTY is not a hard failure (unattended install can finish
+        # without login), but state is NOT recorded because credentials are
+        # missing. Caller re-runs on resume.
+        return 1
     fi
 
+    # F3: postcondition -- credentials file MUST exist after login.
     if [[ -f "${creds_dir}/.credentials.json" ]]; then
         local ver
         ver=$(as_user "$claude_bin" --version 2>/dev/null || echo "unknown")
         info "Claude Code authorized successfully (v${ver})."
+        return 0
     else
-        warn "Could not verify Claude Code authorization."
+        warn "Could not verify Claude Code authorization (no .credentials.json)."
         warn "You can authorize later by running: claude login"
+        return 1
     fi
 }
 
