@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EdgeLab AI Agent -- Quick Start Installer v2.2.3
+# EdgeLab AI Agent -- Quick Start Installer v2.2.4
 # https://edgelab.su
 # Usage: curl -fsSL https://edgelab.su/install | sudo bash
 # Supports: Ubuntu 22.04 / 24.04 / 25.04, amd64 / arm64
@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="2.2.3"
+readonly EDGELAB_VERSION="2.2.4"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -678,6 +678,19 @@ gather_inputs() {
 
     info "Agent: ${AGENT_NAME} (${AGENT_ROLE})"
     info "Operator: ${OPERATOR_NAME} / tz=${OPERATOR_TIMEZONE} / lang=${OPERATOR_LANGUAGE}"
+
+    # Apply system timezone so `date`, cron and quick-reminders compute correct local times.
+    if [[ -n "$OPERATOR_TIMEZONE" && "$OPERATOR_TIMEZONE" != "UTC" ]]; then
+        if command -v timedatectl >/dev/null 2>&1; then
+            if timedatectl set-timezone "$OPERATOR_TIMEZONE" 2>/dev/null; then
+                info "System timezone set to ${OPERATOR_TIMEZONE}"
+            else
+                warn "Failed to set system timezone to ${OPERATOR_TIMEZONE} -- reminders may show wrong time. Fix manually: sudo timedatectl set-timezone ${OPERATOR_TIMEZONE}"
+            fi
+        else
+            warn "timedatectl not available -- system timezone unchanged (stays UTC)."
+        fi
+    fi
 
     # F1: persist inputs to state file IMMEDIATELY (before heavier steps can fail).
     # This ensures SIGKILL+resume finds AGENT_NAME / OPERATOR_* on disk.
