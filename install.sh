@@ -1191,8 +1191,22 @@ install_gateway() {
             fi
             as_user "$py_cmd" -m venv "$venv_dir"
         fi
-        as_user "${venv_dir}/bin/pip" install -r "${gateway_dir}/requirements.txt" --quiet \
-            || warn "Failed to install gateway Python deps -- install manually."
+        if ! as_user "${venv_dir}/bin/pip" install -r "${gateway_dir}/requirements.txt" --quiet; then
+            error "Failed to install gateway Python deps. Re-run installer after fixing network/pip."
+            return 1
+        fi
+    fi
+
+    # F6: fail-fast -- venv python must exist and have required packages importable.
+    local venv_py="${gateway_dir}/.venv/bin/python"
+    if [[ ! -x "$venv_py" ]]; then
+        error "Gateway venv python not found at ${venv_py}."
+        return 1
+    fi
+    if ! as_user "$venv_py" -c "import aiohttp, dotenv" 2>/dev/null; then
+        error "Gateway venv is missing required packages (aiohttp, dotenv)."
+        error "Check ${gateway_dir}/requirements.txt and re-run installer."
+        return 1
     fi
 
     info "Telegram Gateway ready at ${gateway_dir}"
@@ -1419,7 +1433,26 @@ SVCEOF
 
     if [[ -n "$CONFIGURED_BOT_TOKEN" ]]; then
         systemctl enable claude-gateway --quiet 2>/dev/null || true
-        systemctl start claude-gateway 2>/dev/null || true
+        # F6: drop `|| true` -- we want to see start failures.
+        if ! systemctl start claude-gateway; then
+            error "systemctl start claude-gateway failed."
+            journalctl -u claude-gateway -n 10 --no-pager 2>/dev/null || true
+            return 1
+        fi
+        # F6: poll is-active up to 10s (0.5s increments) before claiming success.
+        local i=0
+        while [[ $i -lt 20 ]]; do
+            if systemctl is-active --quiet claude-gateway; then
+                break
+            fi
+            sleep 0.5
+            i=$((i + 1))
+        done
+        if ! systemctl is-active --quiet claude-gateway; then
+            error "claude-gateway did not become active within 10s. Last 10 log lines:"
+            journalctl -u claude-gateway -n 10 --no-pager 2>/dev/null || true
+            return 1
+        fi
         info "Gateway started! Write to your bot in Telegram."
     else
         info "Gateway not started -- configure bot token first."
