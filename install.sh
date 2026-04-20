@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EdgeLab AI Agent -- Quick Start Installer v2.2.4
+# EdgeLab AI Agent -- Quick Start Installer v2.2.5
 # https://edgelab.su
 # Usage: curl -fsSL https://edgelab.su/install | sudo bash
 # Supports: Ubuntu 22.04 / 24.04 / 25.04, amd64 / arm64
@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="2.2.4"
+readonly EDGELAB_VERSION="2.2.5"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -196,6 +196,53 @@ prompt_or_env() {
 
     printf -v "$var_name" '%s' "$value"
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# normalize_timezone: map short names / common aliases to IANA format
+# ---------------------------------------------------------------------------
+# Resolves student input like "moscow", "Moscow", "MADRID", "bangkok" to the
+# canonical IANA name ("Europe/Moscow", "Asia/Bangkok") by searching
+# `timedatectl list-timezones`. Already-canonical inputs (contain "/") are
+# returned as-is. Returns 0 if resolved, 1 if no match found (caller decides
+# whether to warn / keep raw value).
+normalize_timezone() {
+    local input="$1"
+    local trimmed
+    trimmed="$(echo "$input" | tr -d '[:space:]')"
+
+    if [[ -z "$trimmed" || "$trimmed" == "UTC" ]]; then
+        echo "$trimmed"
+        return 0
+    fi
+
+    if [[ "$trimmed" == *"/"* ]]; then
+        echo "$trimmed"
+        return 0
+    fi
+
+    if command -v timedatectl >/dev/null 2>&1; then
+        local match
+        # Prefer exact city match at the end of an IANA zone (e.g. Europe/Moscow)
+        match=$(timedatectl list-timezones 2>/dev/null \
+            | grep -iE "/${trimmed}$" \
+            | head -n1)
+        if [[ -n "$match" ]]; then
+            echo "$match"
+            return 0
+        fi
+        # Fallback: case-insensitive exact match (handles "UTC", "GMT", region-only)
+        match=$(timedatectl list-timezones 2>/dev/null \
+            | grep -iE "^${trimmed}$" \
+            | head -n1)
+        if [[ -n "$match" ]]; then
+            echo "$match"
+            return 0
+        fi
+    fi
+
+    echo "$input"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -667,8 +714,23 @@ gather_inputs() {
     prompt_or_env AGENT_NAME EDGELAB_AGENT_NAME "Agent name (short, e.g. 'jarvis', 'friday')" "jarvis"
     prompt_or_env AGENT_ROLE EDGELAB_AGENT_ROLE "Agent role (one line description)" "personal AI assistant"
     prompt_or_env OPERATOR_NAME EDGELAB_USER_NAME "Your name (how the agent should address you)" "boss"
-    prompt_or_env OPERATOR_TIMEZONE EDGELAB_TIMEZONE "Your timezone (IANA, e.g. 'Europe/Moscow')" "UTC"
+    prompt_or_env OPERATOR_TIMEZONE EDGELAB_TIMEZONE "Your timezone (city name or IANA, e.g. 'Moscow' or 'Europe/Moscow')" "UTC"
     prompt_or_env OPERATOR_LANGUAGE EDGELAB_LANGUAGE "Preferred response language (e.g. 'en', 'ru')" "en"
+
+    # Normalize short timezone input (e.g. "moscow" -> "Europe/Moscow") before
+    # anything downstream touches $OPERATOR_TIMEZONE. timedatectl requires IANA
+    # format; without this a student typing just a city name ends up on UTC.
+    if [[ -n "$OPERATOR_TIMEZONE" && "$OPERATOR_TIMEZONE" != "UTC" && "$OPERATOR_TIMEZONE" != *"/"* ]]; then
+        local _tz_normalized
+        if _tz_normalized=$(normalize_timezone "$OPERATOR_TIMEZONE"); then
+            if [[ "$_tz_normalized" != "$OPERATOR_TIMEZONE" ]]; then
+                info "Normalized timezone: '${OPERATOR_TIMEZONE}' -> '${_tz_normalized}'"
+                OPERATOR_TIMEZONE="$_tz_normalized"
+            fi
+        else
+            warn "Unknown timezone '${OPERATOR_TIMEZONE}' -- no match in 'timedatectl list-timezones'. Keeping raw value; system clock will stay on UTC. Fix after install: sudo timedatectl set-timezone Europe/Moscow"
+        fi
+    fi
 
     AGENT_NAME=$(echo "$AGENT_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-_')
     if [[ -z "$AGENT_NAME" ]]; then
