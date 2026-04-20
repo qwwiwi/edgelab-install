@@ -34,6 +34,7 @@ SKILLS_FROM_INSTALLER=(onboarding self-compiler quick-reminders present)
 
 # URL to fetch installer-bundled skills if running via curl | bash
 readonly INSTALLER_REPO="https://github.com/qwwiwi/edgelab-install.git"
+readonly INSTALLER_REF="${EDGELAB_INSTALLER_REF:-main}"
 
 # Shared curl options: timeout + retry (prevents hanging forever on bad network)
 readonly CURL_OPTS=(-fsSL --max-time 60 --retry 2 --retry-delay 3)
@@ -382,9 +383,9 @@ locate_installer_skills() {
     local dir
     dir=$(mktemp -d)
     TMPDIRS+=("$dir")
-    info "Cloning installer skills from ${INSTALLER_REPO}..." >&2
-    if ! git clone --quiet --depth 1 "$INSTALLER_REPO" "$dir" >&2; then
-        error "Failed to clone installer repo for bundled skills."
+    info "Cloning installer skills from ${INSTALLER_REPO} (ref=${INSTALLER_REF})..." >&2
+    if ! git clone --quiet --depth 1 --branch "$INSTALLER_REF" "$INSTALLER_REPO" "$dir" >&2; then
+        error "Failed to clone installer repo for bundled skills (ref=${INSTALLER_REF})."
         return 1
     fi
 
