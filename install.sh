@@ -1236,9 +1236,37 @@ setup_bot_token() {
     fi
 }
 
+# F2: build a curl config-file containing the URL (and optional data lines).
+# Token stays out of argv -- /proc/<pid>/cmdline sees only `curl -K /tmp/xxx`.
+# Usage: _tg_curl_cfg <token> <method> [key=value ...]  -> prints cfg path.
+_tg_curl_cfg() {
+    local token="$1"
+    local method="$2"
+    shift 2
+    local cfg
+    (
+        umask 077
+        cfg=$(mktemp)
+        # Emit URL line first (curl config-file syntax: key = "value").
+        printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$token" "$method" > "$cfg"
+        # Emit each data pair as its own data line.
+        local kv
+        for kv in "$@"; do
+            printf 'data = "%s"\n' "$kv" >> "$cfg"
+        done
+        printf '%s\n' "$cfg"
+    )
+}
+
 _tg_getme() {
     local token="$1"
-    curl_safe "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo '{"ok":false}'
+    local cfg
+    cfg=$(_tg_curl_cfg "$token" "getMe")
+    TMPFILES+=("$cfg")
+    local resp
+    resp=$(curl_safe -K "$cfg" 2>/dev/null || echo '{"ok":false}')
+    rm -f "$cfg"
+    printf '%s' "$resp"
 }
 
 # ---------------------------------------------------------------------------
@@ -1366,13 +1394,17 @@ test_connection() {
         return 0
     fi
 
+    # F2: sensitive URL (contains bot token) must not appear in argv.
+    # Build a curl config-file with url + data lines, then curl_safe -K cfg.
+    local cfg
+    cfg=$(_tg_curl_cfg "$CONFIGURED_BOT_TOKEN" "sendMessage" \
+        "chat_id=${CONFIGURED_TG_ID}" \
+        "text=Your AI agent (${AGENT_NAME}) is connected! Write me anything." \
+        "parse_mode=HTML")
+    TMPFILES+=("$cfg")
     local resp
-    resp=$(curl_safe -X POST \
-        "https://api.telegram.org/bot${CONFIGURED_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${CONFIGURED_TG_ID}" \
-        -d "text=Your AI agent (${AGENT_NAME}) is connected! Write me anything." \
-        -d "parse_mode=HTML" \
-        2>/dev/null || echo '{"ok":false}')
+    resp=$(curl_safe -K "$cfg" -X POST 2>/dev/null || echo '{"ok":false}')
+    rm -f "$cfg"
 
     local msg_ok
     msg_ok=$(echo "$resp" | jq -r '.ok // false' 2>/dev/null || echo "false")
