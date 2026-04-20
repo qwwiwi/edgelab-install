@@ -1213,11 +1213,10 @@ install_gateway() {
     fi
 
     local secrets_dir="${gateway_dir}/secrets"
-    if [[ ! -d "$secrets_dir" ]]; then
-        as_user mkdir -p "$secrets_dir"
-        chmod 700 "$secrets_dir"
-        fix_owner "$secrets_dir"
-    fi
+    # M6 (Phase 5): atomic directory creation with mode 700 and correct owner.
+    # The old mkdir+chmod sequence briefly left the dir at 755, which is a
+    # security window on shared hosts.
+    install -d -m 700 -o "$REAL_USER" -g "$REAL_USER" "$secrets_dir"
 
     if [[ -f "${gateway_dir}/requirements.txt" ]]; then
         local venv_dir="${gateway_dir}/.venv"
@@ -1644,9 +1643,8 @@ _setup_openviking() {
     fi
 
     local ov_dir="${REAL_HOME}/.openviking"
-    if [[ ! -d "$ov_dir" ]]; then
-        as_user mkdir -p "$ov_dir"
-    fi
+    # M6 (Phase 5): atomic directory creation at mode 700 (contains ov.conf with API key).
+    install -d -m 700 -o "$REAL_USER" -g "$REAL_USER" "$ov_dir"
 
     local ov_conf="${ov_dir}/ov.conf"
     local ov_key=""
