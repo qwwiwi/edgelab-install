@@ -267,17 +267,71 @@ load_state() {
     local sf
     sf=$(state_file)
     mkdir -p "$(dirname "$sf")"
-    if [[ -f "$sf" ]]; then
-        mapfile -t COMPLETED_STEPS < <(jq -r '.completed_steps[]? // empty' "$sf" 2>/dev/null || true)
-        local v
-        v=$(jq -r '.version // ""' "$sf" 2>/dev/null || echo "")
-        if [[ "$v" != "$EDGELAB_VERSION" ]]; then
-            info "State file from version '${v:-unknown}' -- ignoring for v${EDGELAB_VERSION}."
-            COMPLETED_STEPS=()
-            return 0
+    if [[ ! -f "$sf" ]]; then
+        return 0
+    fi
+
+    local v
+    v=$(jq -r '.version // ""' "$sf" 2>/dev/null || echo "")
+    if [[ "$v" != "$EDGELAB_VERSION" ]]; then
+        info "State file from version '${v:-unknown}' -- ignoring for v${EDGELAB_VERSION}."
+        COMPLETED_STEPS=()
+        return 0
+    fi
+
+    mapfile -t COMPLETED_STEPS < <(jq -r '.completed_steps[]? // empty' "$sf" 2>/dev/null || true)
+
+    # F4: drift detection on REAL_USER (persisted in state file).
+    local saved_user
+    saved_user=$(jq -r '.real_user // ""' "$sf" 2>/dev/null || echo "")
+    if [[ -n "$saved_user" && -n "${REAL_USER:-}" && "$saved_user" != "$REAL_USER" ]]; then
+        error "State file was created for user '${saved_user}', but current install runs as '${REAL_USER}'."
+        error "Remove ${sf} and re-run the installer."
+        exit 1
+    fi
+
+    # F1: reload persisted gather_inputs answers (safe fields only, NO secrets).
+    local val
+    for field in agent_name agent_role operator_name operator_timezone operator_language; do
+        val=$(jq -r ".inputs.${field} // \"\"" "$sf" 2>/dev/null || echo "")
+        case "$field" in
+            agent_name)          [[ -n "$val" ]] && AGENT_NAME="$val" ;;
+            agent_role)          [[ -n "$val" ]] && AGENT_ROLE="$val" ;;
+            operator_name)       [[ -n "$val" ]] && OPERATOR_NAME="$val" ;;
+            operator_timezone)   [[ -n "$val" ]] && OPERATOR_TIMEZONE="$val" ;;
+            operator_language)   [[ -n "$val" ]] && OPERATOR_LANGUAGE="$val" ;;
+        esac
+    done
+
+    # F1: re-derive secrets from disk on resume (never stored in state file).
+    if [[ -n "${AGENT_NAME:-}" && -n "${REAL_HOME:-}" ]]; then
+        local token_file="${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets/bot-token"
+        if [[ -s "$token_file" ]]; then
+            CONFIGURED_BOT_TOKEN=$(cat "$token_file" 2>/dev/null || echo "")
+            if [[ -n "$CONFIGURED_BOT_TOKEN" ]]; then
+                local resp
+                resp=$(_tg_getme "$CONFIGURED_BOT_TOKEN" 2>/dev/null || echo '{"ok":false}')
+                local ok
+                ok=$(echo "$resp" | jq -r '.ok // false' 2>/dev/null || echo "false")
+                if [[ "$ok" == "true" ]]; then
+                    CONFIGURED_BOT_USERNAME=$(echo "$resp" | jq -r '.result.username // ""' 2>/dev/null || echo "")
+                fi
+            fi
         fi
-        if [[ ${#COMPLETED_STEPS[@]} -gt 0 ]]; then
-            info "Resuming install: ${#COMPLETED_STEPS[@]} step(s) already done."
+        local cfg_file="${REAL_HOME}/${GATEWAY_DIR_NAME}/config.json"
+        if [[ -f "$cfg_file" ]]; then
+            local first_id
+            first_id=$(jq -r '.allowlist_user_ids[0] // empty' "$cfg_file" 2>/dev/null || echo "")
+            if [[ -n "$first_id" && "$first_id" =~ ^[0-9]+$ ]]; then
+                CONFIGURED_TG_ID="$first_id"
+            fi
+        fi
+    fi
+
+    if [[ ${#COMPLETED_STEPS[@]} -gt 0 ]]; then
+        info "Resuming install: ${#COMPLETED_STEPS[@]} step(s) already done."
+        if [[ -n "${AGENT_NAME:-}" ]]; then
+            info "Restored agent='${AGENT_NAME}' from state file."
         fi
     fi
 }
@@ -293,13 +347,18 @@ is_step_done() {
 
 record_step() {
     local name="$1"
-    COMPLETED_STEPS+=("$name")
+    # Idempotent: do not add duplicate entries (F1 -- gather_inputs records
+    # its own completion before run_step records it again).
+    if ! is_step_done "$name"; then
+        COMPLETED_STEPS+=("$name")
+    fi
 
     local sf
     sf=$(state_file)
     mkdir -p "$(dirname "$sf")"
     local tmp
-    tmp=$(mktemp)
+    # M3: keep tmpfile on the same filesystem as state file (atomic mv).
+    tmp=$(mktemp -p "$(dirname "$sf")")
     TMPFILES+=("$tmp")
 
     local steps_json
@@ -313,12 +372,32 @@ record_step() {
         started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
 
+    # F1: persist safe gather_inputs fields (NO secrets) + REAL_USER (F4 drift check).
     jq -n \
         --arg version "$EDGELAB_VERSION" \
         --arg started "$started_at" \
         --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg real_user "${REAL_USER:-}" \
+        --arg agent_name "${AGENT_NAME:-}" \
+        --arg agent_role "${AGENT_ROLE:-}" \
+        --arg operator_name "${OPERATOR_NAME:-}" \
+        --arg operator_timezone "${OPERATOR_TIMEZONE:-}" \
+        --arg operator_language "${OPERATOR_LANGUAGE:-}" \
         --argjson steps "$steps_json" \
-        '{version: $version, started_at: $started, updated_at: $updated, completed_steps: $steps}' \
+        '{
+          version: $version,
+          started_at: $started,
+          updated_at: $updated,
+          real_user: $real_user,
+          completed_steps: $steps,
+          inputs: {
+            agent_name: $agent_name,
+            agent_role: $agent_role,
+            operator_name: $operator_name,
+            operator_timezone: $operator_timezone,
+            operator_language: $operator_language
+          }
+        }' \
         > "$tmp"
     mv "$tmp" "$sf"
     chmod 600 "$sf"
@@ -478,7 +557,9 @@ detect_real_user() {
         REAL_USER="$svc_user"
     fi
     REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-    readonly REAL_USER REAL_HOME
+    # NOTE: REAL_USER / REAL_HOME are intentionally NOT readonly (F4) --
+    # load_state() re-populates them from the state file and performs a
+    # drift-detection check when resuming an install.
     info "Installing for user: ${REAL_USER} (home: ${REAL_HOME})"
 }
 
@@ -538,6 +619,10 @@ gather_inputs() {
 
     info "Agent: ${AGENT_NAME} (${AGENT_ROLE})"
     info "Operator: ${OPERATOR_NAME} / tz=${OPERATOR_TIMEZONE} / lang=${OPERATOR_LANGUAGE}"
+
+    # F1: persist inputs to state file IMMEDIATELY (before heavier steps can fail).
+    # This ensures SIGKILL+resume finds AGENT_NAME / OPERATOR_* on disk.
+    record_step "gather_inputs"
 }
 
 # ---------------------------------------------------------------------------
