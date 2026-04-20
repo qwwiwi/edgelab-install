@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="2.2.0"
+readonly EDGELAB_VERSION="2.2.1"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -1574,17 +1574,15 @@ setup_api_keys_and_cron() {
     step 15 "Setting up optional API keys and memory rotation cron..."
 
     echo ""
-    echo "${COLOR_BOLD}Optional API keys (press Enter to skip any):${COLOR_RESET}"
+    echo "${COLOR_BOLD}Optional API key (press Enter to skip):${COLOR_RESET}"
     echo ""
-    echo "  1. Groq (free) -- voice message transcription"
-    echo "     Get key: https://console.groq.com/keys"
+    echo "  Groq (free) -- voice message transcription"
+    echo "  Get key: https://console.groq.com/keys"
     echo ""
-    echo "  2. OpenViking -- semantic memory for your agent"
-    echo "     Get key: after starting OpenViking server"
+    echo "  (OpenViking semantic memory -- moved to day-2 installer.)"
     echo ""
 
     _setup_groq_key
-    _setup_openviking
     _setup_memory_cron
 }
 
@@ -1934,11 +1932,7 @@ BANNER
             echo "    Groq (voice):    ${COLOR_YELLOW}not configured${COLOR_RESET}"
             ;;
     esac
-    if [[ -n "$CONFIGURED_OV" ]]; then
-        echo "    OpenViking:      ${COLOR_GREEN}configured${COLOR_RESET}"
-    else
-        echo "    OpenViking:      ${COLOR_YELLOW}not configured${COLOR_RESET}"
-    fi
+    echo "    OpenViking:      ${COLOR_YELLOW}day-2 installer${COLOR_RESET}"
     echo ""
 
     if [[ -z "$CONFIGURED_TG_ID" ]]; then
