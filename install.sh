@@ -71,6 +71,17 @@ warn()  { echo "${COLOR_YELLOW}[WARN]${COLOR_RESET}  $*" >&2; }
 error() { echo "${COLOR_RED}[ERROR]${COLOR_RESET} $*" >&2; }
 step()  { echo ""; echo "${COLOR_CYAN}${COLOR_BOLD}[$1/${TOTAL_STEPS}]${COLOR_RESET} $2"; }
 
+# F10: guard — any function that builds paths from AGENT_NAME must fail loudly
+# if the variable is empty. Empty AGENT_NAME used to produce "~/.claude-lab//.claude"
+# and "# EdgeLab memory rotation ()" cron markers that collide across agents.
+_require_agent_name() {
+    if [[ -z "${AGENT_NAME:-}" ]]; then
+        error "AGENT_NAME is empty -- state file corrupted or gather_inputs did not run."
+        exit 1
+    fi
+}
+
+
 # ---------------------------------------------------------------------------
 # apt wrapper -- waits for dpkg lock
 # ---------------------------------------------------------------------------
@@ -894,6 +905,7 @@ SJEOF
 # ---------------------------------------------------------------------------
 
 setup_agent_workspace() {
+    _require_agent_name
     step 7 "Setting up agent workspace for '${AGENT_NAME}'..."
 
     local lab_dir="${REAL_HOME}/.claude-lab"
@@ -1011,6 +1023,7 @@ DEOF
 # ---------------------------------------------------------------------------
 
 install_skills() {
+    _require_agent_name
     step 8 "Installing ${#SKILLS_FROM_TEMPLATE[@]} template skills + ${#SKILLS_FROM_INSTALLER[@]} bundled skills..."
 
     local ws="${REAL_HOME}/.claude-lab/${AGENT_NAME}/.claude"
@@ -1352,6 +1365,7 @@ _tg_getme() {
 # ---------------------------------------------------------------------------
 
 setup_telegram_config() {
+    _require_agent_name
     step 13 "Configuring Telegram gateway..."
 
     local gateway_dir="${REAL_HOME}/${GATEWAY_DIR_NAME}"
@@ -1702,6 +1716,7 @@ OVSEOF
 }
 
 _setup_memory_cron() {
+    _require_agent_name
     local ws="${REAL_HOME}/.claude-lab/${AGENT_NAME}/.claude"
     local scripts_dir="${ws}/scripts"
     as_user mkdir -p "$scripts_dir"
@@ -1852,6 +1867,7 @@ CWEOF
 # ---------------------------------------------------------------------------
 
 print_banner() {
+    _require_agent_name
     step 16 "Installation complete!"
 
     echo ""
