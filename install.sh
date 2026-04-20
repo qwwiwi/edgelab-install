@@ -489,6 +489,22 @@ as_user() {
     fi
 }
 
+# write_as_user: copy SRC to DST with REAL_USER ownership and MODE (default 0644).
+# Works from root even when SRC is a root-owned 0600 mktemp file that REAL_USER
+# cannot read (the old `as_user cp` pattern fails in that case).
+write_as_user() {
+    local src="$1"
+    local dst="$2"
+    local mode="${3:-0644}"
+    local dst_dir
+    dst_dir=$(dirname "$dst")
+    if [[ ! -d "$dst_dir" ]]; then
+        mkdir -p "$dst_dir"
+        chown "${REAL_USER}:${REAL_USER}" "$dst_dir" 2>/dev/null || true
+    fi
+    install -o "${REAL_USER}" -g "${REAL_USER}" -m "${mode}" "$src" "$dst"
+}
+
 fix_owner() {
     local path="$1"
     [[ -e "$path" ]] || return 0
@@ -713,7 +729,7 @@ For agent identity, rules and skills, see:
 
 EdgeLab installer v${EDGELAB_VERSION}
 STUB_EOF
-    as_user cp "$stub_tmp" "$claude_md"
+    write_as_user "$stub_tmp" "$claude_md" 0644
 
     local settings_json="${claude_dir}/settings.json"
     if [[ ! -f "$settings_json" ]]; then
@@ -744,7 +760,7 @@ STUB_EOF
   }
 }
 SJEOF
-        as_user cp "$settings_tmp" "$settings_json"
+        write_as_user "$settings_tmp" "$settings_json" 0644
         info "settings.json written (400K context window + permissions)."
     else
         info "settings.json already exists -- not overwriting."
@@ -961,7 +977,7 @@ install_superpowers() {
     else
         echo '{"plugins": {"superpowers": {"enabled": true, "path": "./superpowers"}}}' | jq . > "$tmp"
     fi
-    as_user cp "$tmp" "$cfg"
+    write_as_user "$tmp" "$cfg" 0644
 
     fix_owner "$plugins_dir"
     info "Superpowers installed at ${sp_dir}"
@@ -1205,7 +1221,7 @@ setup_telegram_config() {
         }
       }
     }' > "$tmp"
-    as_user cp "$tmp" "$config_file"
+    write_as_user "$tmp" "$config_file" 0600
     fix_owner "$config_file"
     info "Gateway config written to ${config_file}"
 
@@ -1407,9 +1423,8 @@ _setup_openviking() {
       account: "default",
       user: "agent"
     }' > "$tmp"
-    as_user cp "$tmp" "$ov_conf"
+    write_as_user "$tmp" "$ov_conf" 0600
     fix_owner "$ov_conf"
-    chmod 600 "$ov_conf"
 
     if [[ "$ov_key" != "CHANGE_ME" ]]; then
         info "OpenViking config written with API key."
