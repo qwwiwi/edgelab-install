@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EdgeLab AI Agent -- Quick Start Installer v2.2.0
+# EdgeLab AI Agent -- Quick Start Installer v2.2.2
 # https://edgelab.su
 # Usage: curl -fsSL https://edgelab.su/install | sudo bash
 # Supports: Ubuntu 22.04 / 24.04 / 25.04, amd64 / arm64
@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="2.2.1"
+readonly EDGELAB_VERSION="2.2.2"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -606,12 +606,24 @@ detect_real_user() {
     # NOTE: REAL_USER / REAL_HOME are intentionally NOT readonly (F4) --
     # load_state() re-populates them from the state file and performs a
     # drift-detection check when resuming an install.
+
+    # as_user() uses `env -C "$REAL_HOME"` -- precheck accessibility so we
+    # fail loudly (not with cryptic env rc=125) if REAL_HOME is missing or
+    # not traversable (unusual NFS/quota edge cases).
+    if [[ -z "$REAL_HOME" || ! -d "$REAL_HOME" || ! -x "$REAL_HOME" ]]; then
+        error "REAL_HOME='${REAL_HOME}' is not a traversable directory for user '${REAL_USER}'."
+        exit 1
+    fi
+
     info "Installing for user: ${REAL_USER} (home: ${REAL_HOME})"
 }
 
 as_user() {
     if [[ "$(id -u)" -eq 0 && "$REAL_USER" != "root" ]]; then
-        runuser --user "$REAL_USER" -- "$@"
+        # sudo -H sets HOME to the target user's home; CWD is set to REAL_HOME
+        # so project-level config lookups (e.g. Claude Code reading .mcp.json)
+        # do not resolve against /root.
+        sudo -u "$REAL_USER" -H -- env -C "$REAL_HOME" "$@"
     else
         "$@"
     fi
@@ -826,6 +838,53 @@ install_claude_code() {
         error "  curl -fsSL https://claude.ai/install.sh | bash"
         exit 1
     fi
+
+    ensure_path_export
+}
+
+# ensure_path_export: make sure `~/.local/bin` is on REAL_USER's PATH for
+# future shells. Anthropic's installer drops `claude` there but does not
+# touch shellrc, so fresh SSH sessions cannot find the binary.
+#
+# Placement matters: Ubuntu's stock `.bashrc` begins with
+#   [ -z "$PS1" ] && return
+# which aborts the file for non-interactive shells (e.g. `ssh host 'cmd'`).
+# So in `.bashrc` we PREPEND the export (runs before the guard), and in
+# `.profile` we APPEND (login shells read .profile fully).
+#
+# Idempotency is gated by a unique marker line written alongside the export,
+# not by substring-matching the export itself (which could false-positive on
+# unrelated user content).
+ensure_path_export() {
+    local marker='# Added by EdgeLab installer: expose ~/.local/bin (claude, python3.12, etc.)'
+    local export_line='export PATH="$HOME/.local/bin:$PATH"'
+
+    local rc_file placement
+    for rc_file in "${REAL_HOME}/.bashrc:prepend" "${REAL_HOME}/.profile:append"; do
+        local rc="${rc_file%:*}"
+        placement="${rc_file##*:}"
+
+        if [[ ! -f "$rc" ]]; then
+            as_user touch "$rc"
+        fi
+
+        if grep -Fq "$marker" "$rc" 2>/dev/null; then
+            continue
+        fi
+
+        local tmp
+        tmp=$(mktemp)
+        TMPFILES+=("$tmp")
+
+        if [[ "$placement" == "prepend" ]]; then
+            { echo "$marker"; echo "$export_line"; echo ''; cat "$rc"; } >"$tmp"
+        else
+            { cat "$rc"; echo ''; echo "$marker"; echo "$export_line"; } >"$tmp"
+        fi
+
+        install -o "${REAL_USER}" -g "${REAL_USER}" -m 0644 "$tmp" "$rc"
+        info "Added ~/.local/bin to PATH in $(basename "$rc") (${placement})"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -1163,9 +1222,7 @@ install_superpowers() {
 # ---------------------------------------------------------------------------
 
 authorize_claude() {
-    step 10 "Authorizing Claude Code..."
-
-    local claude_bin="${REAL_HOME}/.local/bin/claude"
+    step 10 "Claude Code authorization (manual follow-up)..."
 
     local creds_dir="${REAL_HOME}/.claude"
     if [[ -f "${creds_dir}/.credentials.json" ]]; then
@@ -1173,36 +1230,17 @@ authorize_claude() {
         return 0
     fi
 
+    # v2.2.2: Anthropic CLI v2.1.114+ drops into an interactive chat after
+    # successful OAuth and does not return to the parent shell. Running
+    # `claude login` inline from `curl | sudo bash` therefore blocks the
+    # installer indefinitely, and Ctrl+C kills the whole pipe chain.
+    # We intentionally DO NOT call `claude login` here -- the final banner
+    # prints the exact command the user must run manually after install.
     echo ""
-    echo "Claude Code needs to be authorized with your Anthropic account."
-    echo "This will open a browser URL for you to log in."
+    echo "${COLOR_YELLOW}Claude Code authorization is a separate, manual step.${COLOR_RESET}"
+    echo "The final banner prints the exact command to run."
     echo ""
-    echo "${COLOR_BOLD}If the browser does not open automatically,${COLOR_RESET}"
-    echo "${COLOR_BOLD}copy the URL shown below and open it manually.${COLOR_RESET}"
-    echo ""
-
-    if [[ -r /dev/tty ]]; then
-        as_user "$claude_bin" login < /dev/tty || true
-    else
-        warn "No TTY available -- skipping interactive login."
-        warn "Run 'claude login' manually as ${REAL_USER} when ready."
-        # F3: non-TTY is not a hard failure (unattended install can finish
-        # without login), but state is NOT recorded because credentials are
-        # missing. Caller re-runs on resume.
-        return 1
-    fi
-
-    # F3: postcondition -- credentials file MUST exist after login.
-    if [[ -f "${creds_dir}/.credentials.json" ]]; then
-        local ver
-        ver=$(as_user "$claude_bin" --version 2>/dev/null || echo "unknown")
-        info "Claude Code authorized successfully (v${ver})."
-        return 0
-    else
-        warn "Could not verify Claude Code authorization (no .credentials.json)."
-        warn "You can authorize later by running: claude login"
-        return 1
-    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1942,10 +1980,22 @@ BANNER
     fi
 
     cat << EOF
+  ${COLOR_BOLD}${COLOR_YELLOW}NEXT STEP: authorize Claude Code (manual)${COLOR_RESET}
+    sudo -u ${REAL_USER} bash -lc 'claude login'
+
+  The \`claude login\` flow will:
+    1. Show a menu -- pick "Subscription (Claude Max, Pro)"
+    2. Print a URL. Open it in your browser, sign in with the Gmail
+       account dedicated to this agent, then copy the code shown.
+    3. Paste the code back into the terminal when prompted.
+    4. After "Security notes..." press Enter to accept.
+    5. You land in a Claude chat. Type \`/exit\` (or press Ctrl+C) to
+       return to the shell.
+
   Personalize your agent:
     nano ~/.claude-lab/${AGENT_NAME}/.claude/CLAUDE.md
 
-  Run /onboarding to personalize your agent via chat.
+  Run /onboarding (inside claude) to personalize your agent via chat.
 
   Installed: Claude Code, Telegram Gateway, Cron
   Cron jobs: rotate-warm (04:30), trim-hot (05:00), compress-warm (06:00)
