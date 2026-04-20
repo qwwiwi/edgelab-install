@@ -627,7 +627,8 @@ write_as_user() {
 fix_owner() {
     local path="$1"
     [[ -e "$path" ]] || return 0
-    chown -R "${REAL_USER}:${REAL_USER}" "$path"
+    # M5: -h affects symlinks themselves, -P never traverses them.
+    chown -RhP "${REAL_USER}:${REAL_USER}" "$path"
 }
 
 # ---------------------------------------------------------------------------
