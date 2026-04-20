@@ -232,22 +232,40 @@ install_skill_bundle() {
     fi
 
     local dst="${dst_parent}/${skill_name}"
-    local stage
-    stage=$(mktemp -d)
-    TMPDIRS+=("$stage")
-
-    mkdir -p "${stage}/${skill_name}"
-    rsync -a --delete "${src}/" "${stage}/${skill_name}/"
 
     mkdir -p "$dst_parent"
+
+    # F9: stage UNDER dst_parent so the final mv is a same-filesystem rename
+    # (atomic). /tmp on tmpfs crossing ext4 used to copy+unlink, not atomic.
+    local stage="${dst_parent}/.${skill_name}.staging.$$"
+    rm -rf "$stage" 2>/dev/null || true
+    mkdir -p "$stage"
+    TMPDIRS+=("$stage")
+
+    if ! rsync -a --delete "${src}/" "${stage}/${skill_name}/"; then
+        rm -rf "$stage"
+        error "install_skill_bundle: rsync failed for '${skill_name}'."
+        return 1
+    fi
 
     if [[ -d "$dst" ]]; then
         rm -rf "${dst}.prev" 2>/dev/null || true
         mv "$dst" "${dst}.prev"
     fi
 
-    mv "${stage}/${skill_name}" "$dst"
+    # F9: on mv failure, restore .prev so destination does not end up empty.
+    if ! mv "${stage}/${skill_name}" "$dst"; then
+        error "install_skill_bundle: mv of staged '${skill_name}' failed."
+        if [[ -d "${dst}.prev" ]]; then
+            mv "${dst}.prev" "$dst" || true
+            warn "Restored previous version of '${skill_name}'."
+        fi
+        rm -rf "$stage"
+        return 1
+    fi
+
     rm -rf "${dst}.prev" 2>/dev/null || true
+    rm -rf "$stage" 2>/dev/null || true
 
     INSTALLED_SKILLS+=("$skill_name")
     return 0
