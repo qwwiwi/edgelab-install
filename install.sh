@@ -201,23 +201,20 @@ fill_template() {
         return 1
     fi
 
-    local sed_args=()
-    while [[ $# -gt 0 ]]; do
-        local key="$1"
-        local val="${2:-}"
-        shift 2 || true
-        local escaped
-        escaped=$(printf '%s' "$val" | sed -e 's/[\/&]/\\&/g' -e ':a;N;$!ba;s/\n/\\n/g')
-        sed_args+=(-e "s/{{${key}}}/${escaped}/g")
-    done
-
-    local tmp
-    tmp=$(mktemp)
-    TMPFILES+=("$tmp")
-    sed "${sed_args[@]}" "$src" > "$tmp"
-
-    mv "$tmp" "$dst"
-    return 0
+    # F8: Python3-based templating. Safer than sed (no BSD/GNU escape
+    # differences, handles multiline values, no regex metacharacter
+    # escaping required). Python3 is installed by step 4; fill_template
+    # first called in step 7.
+    python3 - "$src" "$dst" "$@" <<"PY_FILL_TEMPLATE_EOF"
+import sys
+src, dst, *kv = sys.argv[1:]
+with open(src, "r", encoding="utf-8") as f:
+    body = f.read()
+for k, v in zip(kv[0::2], kv[1::2]):
+    body = body.replace("{{" + k + "}}", v)
+with open(dst, "w", encoding="utf-8") as f:
+    f.write(body)
+PY_FILL_TEMPLATE_EOF
 }
 
 # ---------------------------------------------------------------------------
