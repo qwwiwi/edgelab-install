@@ -783,7 +783,15 @@ install_claude_code() {
 
     if [[ -x "$claude_bin" ]]; then
         info "Claude Code CLI already installed at ${claude_bin} -- updating."
-        as_user "$claude_bin" update || true
+        # M1: capture exit code instead of silent `|| true`; warn on failure.
+        local update_log
+        update_log=$(mktemp)
+        TMPFILES+=("$update_log")
+        if ! as_user "$claude_bin" update >"$update_log" 2>&1; then
+            warn "claude update returned non-zero. Output:"
+            sed 's/^/  /' "$update_log" >&2 || true
+            warn "Continuing with the currently installed CLI version."
+        fi
         return 0
     fi
 
