@@ -135,7 +135,7 @@ prompt_or_env() {
     # 1: env override
     local env_val="${!env_name:-}"
     if [[ -n "$env_val" ]]; then
-        declare -g "$var_name=$env_val"
+        printf -v "$var_name" '%s' "$env_val"
         return 0
     fi
 
@@ -153,10 +153,10 @@ prompt_or_env() {
 
     if [[ "$noninteractive" -eq 1 ]]; then
         if [[ -n "$default_val" ]]; then
-            declare -g "$var_name=$default_val"
+            printf -v "$var_name" '%s' "$default_val"
             return 0
         fi
-        declare -g "$var_name="
+        printf -v "$var_name" '%s' ''
         return 0
     fi
 
@@ -179,7 +179,7 @@ prompt_or_env() {
         fi
     fi
 
-    declare -g "$var_name=$value"
+    printf -v "$var_name" '%s' "$value"
     return 0
 }
 
