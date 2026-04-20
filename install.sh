@@ -501,8 +501,17 @@ locate_installer_skills() {
     TMPDIRS+=("$dir")
     info "Cloning installer skills from ${INSTALLER_REPO} (ref=${INSTALLER_REF})..." >&2
     if ! git clone --quiet --depth 1 --branch "$INSTALLER_REF" "$INSTALLER_REPO" "$dir" >&2; then
-        error "Failed to clone installer repo for bundled skills (ref=${INSTALLER_REF})."
-        return 1
+        # M7 (Phase 5): if the pinned ref does not exist (e.g. a feature branch
+        # that has been merged and deleted), fall back to the default branch
+        # so installations still succeed -- with a loud warning.
+        warn "Installer repo clone with ref='${INSTALLER_REF}' failed. Retrying with default branch."
+        rm -rf "$dir"
+        dir=$(mktemp -d)
+        TMPDIRS+=("$dir")
+        if ! git clone --quiet --depth 1 "$INSTALLER_REPO" "$dir" >&2; then
+            error "Failed to clone installer repo for bundled skills (also on default branch)."
+            return 1
+        fi
     fi
 
     if [[ ! -d "${dir}/skills" ]]; then
