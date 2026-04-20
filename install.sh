@@ -26,6 +26,9 @@ readonly BOT_TOKEN_MAX_LEN=50
 readonly TEMPLATE_REPO="https://github.com/qwwiwi/public-architecture-claude-code.git"
 readonly TEMPLATE_SHA="93cc7ddf10c03472616a3a32ff7e6ac731ebe6f2"
 readonly SUPERPOWERS_REPO="https://github.com/pcvelz/superpowers.git"
+# F5: pin Superpowers to a reviewed SHA (supply-chain). Override for testing
+# via EDGELAB_SUPERPOWERS_SHA env var.
+readonly SUPERPOWERS_SHA="${EDGELAB_SUPERPOWERS_SHA:-04bad33282e792ecfd1007a138331f1e6b288eed}"
 
 # Skills pulled from the pinned template repo
 SKILLS_FROM_TEMPLATE=(groq-voice markdown-new perplexity-research datawrapper excalidraw youtube-transcript)
@@ -1053,28 +1056,60 @@ install_superpowers() {
 
     as_user mkdir -p "$plugins_dir"
 
+    # F5: clone depth=1 then fetch + checkout the pinned SHA (supply-chain).
     if [[ -d "$sp_dir" ]]; then
-        info "Superpowers already present -- pulling latest."
-        as_user git -C "$sp_dir" pull --ff-only || warn "Superpowers pull failed."
+        info "Superpowers already present -- fetching pinned SHA ${SUPERPOWERS_SHA:0:8}."
+        as_user git -C "$sp_dir" fetch --depth=1 origin "$SUPERPOWERS_SHA" 2>/dev/null \
+            || warn "Superpowers fetch failed -- keeping existing checkout."
+        as_user git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
+            || warn "Superpowers checkout of pinned SHA failed."
     else
         as_user git clone --quiet --depth 1 "$SUPERPOWERS_REPO" "$sp_dir" \
             || { warn "Failed to clone Superpowers -- skipping."; return 0; }
+        as_user git -C "$sp_dir" fetch --depth=1 origin "$SUPERPOWERS_SHA" 2>/dev/null \
+            || warn "Superpowers fetch --depth=1 of pinned SHA failed -- using HEAD."
+        as_user git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
+            || warn "Superpowers checkout of pinned SHA failed -- using HEAD."
     fi
 
+    # F5/H2: defensive jq merge of plugins config.
     local tmp
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
+    local abs_path="${sp_dir}"
 
     if [[ -f "$cfg" ]]; then
-        jq '.plugins = ((.plugins // {}) + {"superpowers": {"enabled": true, "path": "./superpowers"}})' \
-            "$cfg" > "$tmp"
+        # Validate existing config is a JSON object before merging.
+        if ! jq -e 'type=="object"' "$cfg" >/dev/null 2>&1; then
+            local backup="${cfg}.bak.$(date +%s)"
+            cp "$cfg" "$backup" 2>/dev/null || true
+            warn "Existing ${cfg} is not a JSON object -- backed up to $(basename "$backup")."
+            warn "Skipping Superpowers plugin registration; re-run after inspecting the backup."
+            fix_owner "$plugins_dir"
+            return 0
+        fi
+        if ! jq --arg p "$abs_path" \
+                '.plugins = ((.plugins // {}) + {"superpowers": {"enabled": true, "path": $p}})' \
+                "$cfg" > "$tmp" 2>/dev/null; then
+            warn "jq merge of plugins config failed -- leaving ${cfg} untouched."
+            return 0
+        fi
+        # Guard against empty-output (edge case: jq succeeded but wrote nothing).
+        if [[ ! -s "$tmp" ]]; then
+            warn "jq produced empty output -- leaving ${cfg} untouched."
+            return 0
+        fi
     else
-        echo '{"plugins": {"superpowers": {"enabled": true, "path": "./superpowers"}}}' | jq . > "$tmp"
+        if ! jq -n --arg p "$abs_path" \
+                '{plugins: {superpowers: {enabled: true, path: $p}}}' > "$tmp" 2>/dev/null; then
+            warn "Failed to write initial plugins config -- skipping."
+            return 0
+        fi
     fi
     write_as_user "$tmp" "$cfg" 0644
 
     fix_owner "$plugins_dir"
-    info "Superpowers installed at ${sp_dir}"
+    info "Superpowers installed at ${sp_dir} @ ${SUPERPOWERS_SHA:0:8}"
 }
 
 # ---------------------------------------------------------------------------
