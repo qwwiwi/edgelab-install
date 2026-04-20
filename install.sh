@@ -1368,39 +1368,58 @@ setup_telegram_config() {
     local groq_file_path="${REAL_HOME}/${GATEWAY_DIR_NAME}/secrets/groq-api-key"
     local workspace_path="${REAL_HOME}/.claude-lab/${AGENT_NAME}/.claude"
 
+    # F7: if config already has the right agent + workspace, skip regeneration.
+    # Protects user edits (system_reminder, timeout_sec, extra agents, etc.).
+    local regen_config=1
+    if [[ -f "$config_file" ]]; then
+        if jq -e --arg a "$AGENT_NAME" --arg w "$workspace_path" \
+                '.agents[$a].workspace == $w' \
+                "$config_file" >/dev/null 2>&1; then
+            info "Gateway config already has agent='${AGENT_NAME}' at ${workspace_path} -- skipping regeneration."
+            regen_config=0
+        else
+            local backup="${config_file}.bak.$(date +%s)"
+            cp "$config_file" "$backup" 2>/dev/null || true
+            fix_owner "$backup" 2>/dev/null || true
+            warn "Existing config.json differs -- backed up to $(basename "$backup") before overwrite."
+        fi
+    fi
+
     local tmp
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
 
-    jq -n \
-        --arg comment "EdgeLab AI Agent -- Telegram Gateway Config" \
-        --arg agent_name "$AGENT_NAME" \
-        --arg user_name "$OPERATOR_NAME" \
-        --arg token_file "$token_file_path" \
-        --arg groq_file "$groq_file_path" \
-        --arg workspace "$workspace_path" \
-        --argjson allowlist "${allowlist}" \
-    '{
-      _comment: $comment,
-      poll_interval_sec: 2,
-      allowlist_user_ids: $allowlist,
-      agents: {
-        ($agent_name): {
-          enabled: true,
-          user_name: $user_name,
-          telegram_bot_token_file: $token_file,
-          groq_api_key_file: $groq_file,
-          workspace: $workspace,
-          model: "opus",
-          timeout_sec: 300,
-          streaming_mode: "partial",
-          system_reminder: ""
-        }
-      }
-    }' > "$tmp"
-    write_as_user "$tmp" "$config_file" 0600
-    fix_owner "$config_file"
-    info "Gateway config written to ${config_file}"
+    if [[ $regen_config -eq 1 ]]; then
+        jq -n \
+            --arg comment "EdgeLab AI Agent -- Telegram Gateway Config" \
+            --arg agent_name "$AGENT_NAME" \
+            --arg user_name "$OPERATOR_NAME" \
+            --arg token_file "$token_file_path" \
+            --arg groq_file "$groq_file_path" \
+            --arg workspace "$workspace_path" \
+            --argjson allowlist "${allowlist}" \
+        '{
+          _comment: $comment,
+          poll_interval_sec: 2,
+          allowlist_user_ids: $allowlist,
+          agents: {
+            ($agent_name): {
+              enabled: true,
+              user_name: $user_name,
+              telegram_bot_token_file: $token_file,
+              groq_api_key_file: $groq_file,
+              workspace: $workspace,
+              model: "opus",
+              timeout_sec: 300,
+              streaming_mode: "partial",
+              system_reminder: ""
+            }
+          }
+        }' > "$tmp"
+        write_as_user "$tmp" "$config_file" 0600
+        fix_owner "$config_file"
+        info "Gateway config written to ${config_file}"
+    fi
 
     local service_file="/etc/systemd/system/claude-gateway.service"
 
