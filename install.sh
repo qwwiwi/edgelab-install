@@ -1637,8 +1637,10 @@ _setup_groq_key() {
         info "Groq API key validated and saved."
         CONFIGURED_GROQ="yes"
     else
-        warn "Groq API returned HTTP ${http_code} -- key saved, but verify it works."
-        CONFIGURED_GROQ="yes"
+        # M8 (Phase 5): do not claim "configured" on 401/403/5xx. Mark unverified
+        # so the final banner tells the truth.
+        warn "Groq API returned HTTP ${http_code} -- key saved but unverified."
+        CONFIGURED_GROQ="unverified"
     fi
 }
 
@@ -1920,11 +1922,18 @@ BANNER
     echo ""
 
     echo "  API keys status:"
-    if [[ -n "$CONFIGURED_GROQ" ]]; then
-        echo "    Groq (voice):    ${COLOR_GREEN}configured${COLOR_RESET}"
-    else
-        echo "    Groq (voice):    ${COLOR_YELLOW}not configured${COLOR_RESET}"
-    fi
+    # M8 (Phase 5): distinguish "verified" vs "saved but API check failed".
+    case "${CONFIGURED_GROQ:-}" in
+        yes)
+            echo "    Groq (voice):    ${COLOR_GREEN}configured${COLOR_RESET}"
+            ;;
+        unverified)
+            echo "    Groq (voice):    ${COLOR_YELLOW}saved, unverified (API check failed)${COLOR_RESET}"
+            ;;
+        *)
+            echo "    Groq (voice):    ${COLOR_YELLOW}not configured${COLOR_RESET}"
+            ;;
+    esac
     if [[ -n "$CONFIGURED_OV" ]]; then
         echo "    OpenViking:      ${COLOR_GREEN}configured${COLOR_RESET}"
     else
