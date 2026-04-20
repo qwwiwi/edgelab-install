@@ -439,6 +439,26 @@ preflight() {
     esac
 
     info "EdgeLab installer v${EDGELAB_VERSION}"
+
+    bootstrap_deps
+}
+
+# Bootstrap: install minimal prereqs that the state machine itself depends on
+# (jq + git + curl + ca-certificates). Called from preflight BEFORE any
+# run_step/record_step, because record_step uses jq to emit the state file.
+bootstrap_deps() {
+    local missing=()
+    local b
+    for b in jq git curl; do
+        command -v "$b" >/dev/null 2>&1 || missing+=("$b")
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
+    info "Installing bootstrap deps: ${missing[*]}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt_get update -qq
+    apt_get install -y -qq ca-certificates "${missing[@]}"
 }
 
 # ---------------------------------------------------------------------------
