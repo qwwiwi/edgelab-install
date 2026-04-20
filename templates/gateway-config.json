@@ -3,10 +3,12 @@
   "poll_interval_sec": 2,
   "allowlist_user_ids": [],
   "agents": {
-    "agent": {
+    "{{AGENT_NAME}}": {
       "enabled": true,
-      "telegram_bot_token_file": "/home/REPLACE_USER/claude-gateway/secrets/bot-token",
-      "workspace": "/home/REPLACE_USER/.claude",
+      "user_name": "{{USER_NAME}}",
+      "telegram_bot_token_file": "/home/{{USER}}/claude-gateway/secrets/bot-token",
+      "groq_api_key_file": "/home/{{USER}}/claude-gateway/secrets/groq-api-key",
+      "workspace": "/home/{{USER}}/.claude-lab/{{AGENT_NAME}}/.claude",
       "model": "opus",
       "timeout_sec": 300,
       "streaming_mode": "partial",

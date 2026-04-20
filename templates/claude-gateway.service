@@ -5,17 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=REPLACE_USER
-Group=REPLACE_USER
-WorkingDirectory=/home/REPLACE_USER/claude-gateway
-ExecStart=/home/REPLACE_USER/claude-gateway/.venv/bin/python /home/REPLACE_USER/claude-gateway/gateway.py
+User={{USER}}
+Group={{USER}}
+WorkingDirectory=/home/{{USER}}/claude-gateway
+ExecStart=/home/{{USER}}/claude-gateway/.venv/bin/python /home/{{USER}}/claude-gateway/gateway.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=claude-gateway
-Environment=HOME=/home/REPLACE_USER
-Environment=PATH=/home/REPLACE_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/{{USER}}
+Environment=PATH=/home/{{USER}}/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target
