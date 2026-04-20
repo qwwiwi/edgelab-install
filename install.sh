@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EdgeLab AI Agent -- Quick Start Installer v2.2.2
+# EdgeLab AI Agent -- Quick Start Installer v2.2.3
 # https://edgelab.su
 # Usage: curl -fsSL https://edgelab.su/install | sudo bash
 # Supports: Ubuntu 22.04 / 24.04 / 25.04, amd64 / arm64
@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="2.2.2"
+readonly EDGELAB_VERSION="2.2.3"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -1230,7 +1230,7 @@ authorize_claude() {
         return 0
     fi
 
-    # v2.2.2: Anthropic CLI v2.1.114+ drops into an interactive chat after
+    # v2.2.3: Anthropic CLI v2.1.114+ drops into an interactive chat after
     # successful OAuth and does not return to the parent shell. Running
     # `claude login` inline from `curl | sudo bash` therefore blocks the
     # installer indefinitely, and Ctrl+C kills the whole pipe chain.
@@ -1286,8 +1286,8 @@ install_gateway() {
         error "Gateway venv python not found at ${venv_py}."
         return 1
     fi
-    if ! as_user "$venv_py" -c "import aiohttp, dotenv" 2>/dev/null; then
-        error "Gateway venv is missing required packages (aiohttp, dotenv)."
+    if ! as_user "$venv_py" -c "import requests" 2>/dev/null; then
+        error "Gateway venv is missing required package (requests)."
         error "Check ${gateway_dir}/requirements.txt and re-run installer."
         return 1
     fi
