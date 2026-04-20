@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EdgeLab AI Agent -- Quick Start Installer v2.2.5
+# EdgeLab AI Agent -- Quick Start Installer v2.2.6
 # https://edgelab.su
 # Usage: curl -fsSL https://edgelab.su/install | sudo bash
 # Supports: Ubuntu 22.04 / 24.04 / 25.04, amd64 / arm64
@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 
-readonly EDGELAB_VERSION="2.2.5"
+readonly EDGELAB_VERSION="2.2.6"
 readonly NODESOURCE_MAJOR=22
 readonly PYTHON_MIN_MINOR=12
 readonly GATEWAY_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
@@ -51,6 +51,9 @@ if [[ -t 1 ]] && command -v tput &>/dev/null; then
     COLOR_YELLOW=$(tput setaf 3)
     COLOR_RED=$(tput setaf 1)
     COLOR_CYAN=$(tput setaf 6)
+    # Orange from the 256-color palette (208); tput returns "" on 8-color
+    # terminals so this degrades gracefully.
+    COLOR_ORANGE=$(tput setaf 208 2>/dev/null || echo "")
     COLOR_BOLD=$(tput bold)
     COLOR_RESET=$(tput sgr0)
 else
@@ -58,6 +61,7 @@ else
     COLOR_YELLOW=""
     COLOR_RED=""
     COLOR_CYAN=""
+    COLOR_ORANGE=""
     COLOR_BOLD=""
     COLOR_RESET=""
 fi
@@ -2000,11 +2004,19 @@ print_banner() {
     step 16 "Installation complete!"
 
     echo ""
-    echo "${COLOR_BOLD}${COLOR_GREEN}"
+    echo "${COLOR_BOLD}${COLOR_ORANGE}"
     cat << 'BANNER'
-=============================================
-  EdgeLab AI Agent -- installation complete
-=============================================
+  ============================================================
+
+    EEEEE  DDDD    GGGG  EEEEE  L       AAAA   BBBB
+    E      D   D  G      E      L      A    A  B   B
+    EEEE   D   D  G  GG  EEEE   L      AAAAAA  BBBB
+    E      D   D  G   G  E      L      A    A  B   B
+    EEEEE  DDDD    GGGG  EEEEE  LLLLL  A    A  BBBB
+
+       A I   A G E N T   --   I N S T A L L A T I O N   D O N E
+
+  ============================================================
 BANNER
     echo "${COLOR_RESET}"
 
