@@ -31,7 +31,7 @@ set -euo pipefail
 # CONSTANTS
 # =============================================================================
 
-readonly VERSION="3.0.0"
+readonly EDGELAB_VERSION="3.0.0"
 readonly JARVIS_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly JARVIS_DIR_NAME="claude-gateway"
 readonly RICHARD_REPO_SPEC="git+https://github.com/RichardAtCT/claude-code-telegram@v1.6.0"
@@ -982,7 +982,7 @@ install_sudoers() {
     TMPFILES+=("$tmp")
 
     cat > "$tmp" <<SUDOERS
-# edgelab-install v${VERSION} -- narrow passwordless sudo for 'edgelab'.
+# edgelab-install v${EDGELAB_VERSION} -- narrow passwordless sudo for 'edgelab'.
 # Scope: only systemctl + journalctl for the two agent units.
 # Deliberately NO apt-get wildcard -- that's a privilege-escalation hole.
 # If the agent needs to install packages, it asks the operator.
@@ -1066,7 +1066,7 @@ final_instructions() {
     cat <<EOF
 
 $(printf '%b' "$C_GREEN")================================================================================
-  edgelab-install v${VERSION} complete.  Agent-native flow: the root-Claude
+  edgelab-install v${EDGELAB_VERSION} complete.  Agent-native flow: the root-Claude
   agent will configure the rest.  Do NOT run commands by hand below.
 ================================================================================$(printf '%b' "$C_NC")
 
