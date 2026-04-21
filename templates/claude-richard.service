@@ -1,0 +1,22 @@
+[Unit]
+Description=Richard -- Safety-net Claude agent (claude-code-telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+WorkingDirectory=/opt/richard
+EnvironmentFile=/opt/richard/.env
+Environment=HOME=/home/{{USER}}
+Environment=PATH=/home/{{USER}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/richard/venv/bin/claude-telegram-bot
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-richard
+
+[Install]
+WantedBy=multi-user.target
