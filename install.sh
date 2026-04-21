@@ -426,6 +426,7 @@ install_apt_deps() {
     apt_get update -qq
     apt_get install -y -qq \
         ca-certificates gnupg lsb-release \
+        sudo \
         curl wget git jq rsync \
         build-essential \
         python3 python3-venv python3-pip python3-dev \
