@@ -386,8 +386,31 @@ preflight() {
         warn "Network check to api.github.com failed. Installer may fail later."
     fi
 
+    # When run via `curl | bash`, the script lives in /tmp and has no sibling
+    # templates/ or skills/ dirs. Clone the installer repo into a tmp dir and
+    # re-point TEMPLATES_DIR / INSTALLER_ROOT to that clone.
     if [[ ! -d "$TEMPLATES_DIR" ]]; then
-        die "Templates dir not found at ${TEMPLATES_DIR}. Set EDGELAB_TEMPLATES_DIR or run from repo root."
+        if ! command -v git &>/dev/null; then
+            apt_get update -qq
+            apt_get install -y -qq git
+        fi
+        local clone_dir
+        clone_dir=$(mktemp -d)
+        TMPDIRS+=("$clone_dir")
+        log "Templates not found at ${TEMPLATES_DIR}; cloning installer repo..."
+        if ! git clone --quiet --depth 1 --branch "${EDGELAB_INSTALL_REF:-main}" \
+                https://github.com/qwwiwi/edgelab-install.git "$clone_dir"; then
+            warn "Clone of branch ${EDGELAB_INSTALL_REF:-main} failed; falling back to default branch."
+            rm -rf "$clone_dir"
+            clone_dir=$(mktemp -d)
+            TMPDIRS+=("$clone_dir")
+            git clone --quiet --depth 1 \
+                https://github.com/qwwiwi/edgelab-install.git "$clone_dir" \
+                || die "Failed to clone installer repo for templates/skills."
+        fi
+        TEMPLATES_DIR="${clone_dir}/templates"
+        INSTALLER_ROOT="$clone_dir"
+        [[ -d "$TEMPLATES_DIR" ]] || die "Cloned repo has no templates/ dir."
     fi
 
     ok "Preflight passed."
