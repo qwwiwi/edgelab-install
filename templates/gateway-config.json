@@ -12,6 +12,8 @@
       "model": "opus",
       "timeout_sec": 300,
       "streaming_mode": "partial",
+      "streaming_mode_private": "progress",
+      "streaming_mode_group": "off",
       "system_reminder": ""
     }
   }
