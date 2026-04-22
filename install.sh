@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# edgelab-install v3.0.0 -- 3-Claude architecture installer
+# edgelab-install v3.0.1 -- 3-Claude architecture installer
 #
 # Installs on a fresh Ubuntu 22.04 / 24.04 VPS:
 #   - edgelab user (dedicated, non-login-privileged)
@@ -31,7 +31,7 @@ set -euo pipefail
 # CONSTANTS
 # =============================================================================
 
-readonly EDGELAB_VERSION="3.0.0"
+readonly EDGELAB_VERSION="3.0.1"
 readonly JARVIS_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly JARVIS_DIR_NAME="claude-gateway"
 readonly RICHARD_REPO_SPEC="git+https://github.com/RichardAtCT/claude-code-telegram@v1.6.0"
@@ -92,7 +92,7 @@ banner() {
    ___) | (_| | (_| | (_| | | (_| ||  _|   | | | |  __/| |_| | |_|___|_|_|
   |____/ \__,_|\__,_|\__,_|  \__,_| |_|    |_| |_|\___| \__,_|\__|   (_|_)
 
-                   edgelab-install v3.0.0 -- 3-Claude edition
+                   edgelab-install v3.0.1 -- 3-Claude edition
 EOF
     printf '%b\n' "$C_NC"
 }
@@ -425,15 +425,37 @@ install_apt_deps() {
 
     apt_get update -qq
     apt_get install -y -qq \
-        ca-certificates gnupg lsb-release \
+        ca-certificates gnupg lsb-release software-properties-common \
         sudo \
         curl wget git jq rsync \
         build-essential \
-        python3 python3-venv python3-pip python3-dev \
         systemd \
         logrotate
 
-    ok "Base packages installed."
+    # Python 3.12: native on Ubuntu 24.04. On 22.04 we need deadsnakes PPA
+    # because the default python3 is 3.10 and Day 1 promises "Python 3.12+".
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${VERSION_ID:-}" in
+        22.04)
+            if ! command -v python3.12 >/dev/null 2>&1; then
+                log "Adding deadsnakes PPA for Python 3.12 (Ubuntu 22.04)."
+                add-apt-repository -y ppa:deadsnakes/ppa >/dev/null
+                apt_get update -qq
+            fi
+            apt_get install -y -qq python3.12 python3.12-venv python3.12-dev python3-pip
+            # Point /usr/bin/python3 -> python3.12 so `python3 --version` shows 3.12.
+            update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 100 >/dev/null 2>&1 || true
+            update-alternatives --set python3 /usr/bin/python3.12 >/dev/null 2>&1 || true
+            ;;
+        24.04|*)
+            apt_get install -y -qq python3 python3-venv python3-pip python3-dev
+            ;;
+    esac
+
+    local py_ver
+    py_ver=$(python3 --version 2>&1 | awk '{print $2}')
+    ok "Base packages installed (python3=${py_ver})."
 }
 
 # =============================================================================
@@ -566,69 +588,82 @@ OPERATOR_LANGUAGE=""
 OPERATOR_TIMEZONE=""
 
 collect_inputs() {
-    step 5 "Collecting operator defaults (agent-native: tokens filled in later)"
+    step 5 "Collecting operator inputs"
 
-    # Tokens and user ID stay EMPTY by design. The root-Claude agent writes them
-    # into the config files AFTER install via Bash tool, per the workshop flow.
-    # Env overrides still work for headless CI / one-command install.
-    JARVIS_BOT_TOKEN="${EDGELAB_JARVIS_BOT_TOKEN:-}"
+    # Interactive flow (TTY present): installer asks the student for all values.
+    # Non-interactive flow (EDGELAB_NONINTERACTIVE=1 or no TTY): env overrides
+    # required for tokens; operator profile falls back to safe defaults.
+    if ! is_noninteractive; then
+        cat <<'BRIEF'
+
+The installer will now ask a few questions. You need TWO Telegram bots ready
+(create them in @BotFather beforehand) and your numeric Telegram user ID
+(get it from @userinfobot). Tokens are hidden while typing.
+
+BRIEF
+    fi
+
+    prompt_or_env OPERATOR_NAME     EDGELAB_USER_NAME  "Как к вам обращаться?"                "friend"
+    prompt_or_env OPERATOR_LANGUAGE EDGELAB_LANGUAGE   "Язык общения (English / Russian / ...)" "Russian"
+    prompt_or_env OPERATOR_TIMEZONE EDGELAB_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "Europe/Moscow"
+
+    prompt_or_env JARVIS_BOT_TOKEN  EDGELAB_JARVIS_BOT_TOKEN \
+        "Jarvis bot token (from @BotFather, формат 1234567890:ABC...)" \
+        "" --secret
+    prompt_or_env RICHARD_BOT_TOKEN EDGELAB_RICHARD_BOT_TOKEN \
+        "Richard bot token (ДРУГОЙ бот, не совпадает с Jarvis)" \
+        "" --secret
+    prompt_or_env TG_USER_ID        EDGELAB_TG_USER_ID \
+        "Ваш Telegram numeric user ID (from @userinfobot)" \
+        ""
+
     JARVIS_BOT_USERNAME="${EDGELAB_JARVIS_BOT_USER:-}"
-    RICHARD_BOT_TOKEN="${EDGELAB_RICHARD_BOT_TOKEN:-}"
     RICHARD_BOT_USERNAME="${EDGELAB_RICHARD_BOT_USER:-}"
-    TG_USER_ID="${EDGELAB_TG_USER_ID:-}"
 
-    # If tokens were supplied via env, sanity-check them via Telegram API.
+    # Validate Jarvis token.
     if [[ -n "$JARVIS_BOT_TOKEN" ]]; then
         if ! validate_tg_token "$JARVIS_BOT_TOKEN"; then
-            die "EDGELAB_JARVIS_BOT_TOKEN is not a valid Telegram token format."
+            die "Jarvis token format invalid (expected '<digits>:<30+ chars>')."
         fi
         local jresp
         jresp=$(tg_get_me "$JARVIS_BOT_TOKEN")
         if [[ "$(echo "$jresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
             [[ -z "$JARVIS_BOT_USERNAME" ]] && \
                 JARVIS_BOT_USERNAME=$(echo "$jresp" | jq -r '.result.username // ""')
+            ok "Jarvis bot verified: @${JARVIS_BOT_USERNAME:-?}"
         else
             warn "Telegram getMe for Jarvis failed -- token will be written as-is."
         fi
+    else
+        log "Jarvis token empty (interactive skip / non-interactive no-env)."
     fi
 
+    # Validate Richard token.
     if [[ -n "$RICHARD_BOT_TOKEN" ]]; then
         if ! validate_tg_token "$RICHARD_BOT_TOKEN"; then
-            die "EDGELAB_RICHARD_BOT_TOKEN is not a valid Telegram token format."
+            die "Richard token format invalid."
         fi
         if [[ "$RICHARD_BOT_TOKEN" == "$JARVIS_BOT_TOKEN" && -n "$JARVIS_BOT_TOKEN" ]]; then
-            die "Richard token must differ from Jarvis token."
+            die "Richard token must differ from Jarvis token -- create a SEPARATE bot in @BotFather."
         fi
         local rresp
         rresp=$(tg_get_me "$RICHARD_BOT_TOKEN")
         if [[ "$(echo "$rresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
             [[ -z "$RICHARD_BOT_USERNAME" ]] && \
                 RICHARD_BOT_USERNAME=$(echo "$rresp" | jq -r '.result.username // ""')
+            ok "Richard bot verified: @${RICHARD_BOT_USERNAME:-?}"
         else
             warn "Telegram getMe for Richard failed -- token will be written as-is."
         fi
+    else
+        log "Richard token empty."
     fi
 
     if [[ -n "$TG_USER_ID" && ! "$TG_USER_ID" =~ ^[0-9]+$ ]]; then
-        die "EDGELAB_TG_USER_ID must be a positive integer."
+        die "Telegram user ID must be a positive integer (got: ${TG_USER_ID})."
     fi
 
-    # Operator profile has safe defaults -- Claude will personalize later.
-    OPERATOR_NAME="${EDGELAB_USER_NAME:-friend}"
-    OPERATOR_LANGUAGE="${EDGELAB_LANGUAGE:-Russian}"
-    OPERATOR_TIMEZONE="${EDGELAB_TIMEZONE:-Europe/Moscow}"
-
-    if [[ -z "$JARVIS_BOT_TOKEN" ]]; then
-        log "Jarvis token: (empty, to be written by agent after install)"
-    else
-        log "Jarvis token: supplied via env"
-    fi
-    if [[ -z "$RICHARD_BOT_TOKEN" ]]; then
-        log "Richard token: (empty, to be written by agent after install)"
-    else
-        log "Richard token: supplied via env"
-    fi
-    ok "Inputs prepared."
+    ok "Inputs collected: name=${OPERATOR_NAME}, tz=${OPERATOR_TIMEZONE}, lang=${OPERATOR_LANGUAGE}"
 }
 
 # =============================================================================
@@ -657,20 +692,8 @@ install_jarvis() {
         as_edgelab "${venv}/bin/pip" install -r "${dir}/requirements.txt" --quiet
     fi
 
-    # Secrets dir (0700, edgelab-owned). Token file is always created (even empty)
-    # so the agent can Edit it later without worrying about permissions/ownership.
-    local secrets="${dir}/secrets"
-    install -d -m 0700 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$secrets"
-
-    local token_file="${secrets}/bot-token"
-    local token_tmp
-    token_tmp=$(mktemp)
-    TMPFILES+=("$token_tmp")
-    printf '%s' "$JARVIS_BOT_TOKEN" > "$token_tmp"
-    install_as_user "$token_tmp" "$token_file" "$EDGELAB_USER" 0600
-
-    # gateway config.json. allowlist stays empty when TG_USER_ID is empty --
-    # agent fills it in post-install (prod workshop Block 5).
+    # gateway config.json. Holds bot_token and allowed_user_ids inline (Day 1
+    # workshop format). chmod 0600 because it contains a secret.
     local wsroot="${EDGELAB_HOME}/.claude-lab/jarvis/.claude"
     install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" \
         "${EDGELAB_HOME}/.claude-lab" \
@@ -684,15 +707,18 @@ install_jarvis() {
         USER        "$EDGELAB_USER" \
         AGENT_NAME  "jarvis" \
         USER_NAME   "$OPERATOR_NAME"
-    # If TG_USER_ID was supplied via env, inject it into allowlist_user_ids.
-    if [[ -n "$TG_USER_ID" ]]; then
-        local patched
-        patched=$(mktemp)
-        TMPFILES+=("$patched")
-        jq --argjson id "$TG_USER_ID" '.allowlist_user_ids = [$id]' "$config_tmp" > "$patched"
-        mv "$patched" "$config_tmp"
-    fi
-    install_as_user "$config_tmp" "${dir}/config.json" "$EDGELAB_USER" 0644
+    # Inject bot_token and allowed_user_ids via jq. Values may be empty if the
+    # student skipped the prompt -- agent fills them in via Day 1 Block 5.
+    local patched
+    patched=$(mktemp)
+    TMPFILES+=("$patched")
+    local id_arg="null"
+    [[ -n "$TG_USER_ID" ]] && id_arg="[${TG_USER_ID}]"
+    jq --arg tok "$JARVIS_BOT_TOKEN" --argjson ids "${id_arg}" \
+       '.agents.jarvis.bot_token = $tok | .allowed_user_ids = ($ids // [])' \
+       "$config_tmp" > "$patched"
+    mv "$patched" "$config_tmp"
+    install_as_user "$config_tmp" "${dir}/config.json" "$EDGELAB_USER" 0600
 
     # Full agent workspace (CLAUDE.md + core/USER.md + stub cold memory).
     _write_agent_workspace "$wsroot"
@@ -1006,10 +1032,9 @@ install_sudoers() {
     TMPFILES+=("$tmp")
 
     cat > "$tmp" <<SUDOERS
-# edgelab-install v${EDGELAB_VERSION} -- narrow passwordless sudo for 'edgelab'.
-# Scope: only systemctl + journalctl for the two agent units.
-# Deliberately NO apt-get wildcard -- that's a privilege-escalation hole.
-# If the agent needs to install packages, it asks the operator.
+# edgelab-install v${EDGELAB_VERSION} -- passwordless sudo for 'edgelab'.
+# Scope: systemctl + journalctl for two agent units, plus apt package mgmt
+# (Day 1 contract: Richard can run 'sudo apt' for self-repair / package install).
 
 Cmnd_Alias EDGELAB_SYSTEMCTL = \\
     /usr/bin/systemctl start claude-gateway, \\
@@ -1034,7 +1059,11 @@ Cmnd_Alias EDGELAB_JOURNAL = \\
     /usr/bin/journalctl -u claude-richard, \\
     /usr/bin/journalctl -u claude-richard *
 
-${EDGELAB_USER} ALL=(root) NOPASSWD: EDGELAB_SYSTEMCTL, EDGELAB_JOURNAL
+Cmnd_Alias EDGELAB_APT = \\
+    /usr/bin/apt, /usr/bin/apt *, \\
+    /usr/bin/apt-get, /usr/bin/apt-get *
+
+${EDGELAB_USER} ALL=(root) NOPASSWD: EDGELAB_SYSTEMCTL, EDGELAB_JOURNAL, EDGELAB_APT
 SUDOERS
 
     # Validate syntax before installing -- a broken sudoers can lock out sudo.
@@ -1052,26 +1081,45 @@ SUDOERS
 # =============================================================================
 
 enable_services() {
-    step 12 "Reloading systemd (units will be enabled by agent after tokens are set)"
+    step 12 "Enabling systemd services (and starting if OAuth is already set up)"
 
     systemctl daemon-reload
 
-    # CRITICAL: do NOT `systemctl enable` here when tokens are empty. Anthropic
-    # Max OAuth + bot tokens land post-install. If we enable now with empty
-    # token files, the services crash-loop on boot and `systemctl is-active`
-    # returns `activating`/`failed` forever. Agent enables+starts them in Step 2
-    # of final banner after writing tokens.
+    local oauth_ready="no"
+    if [[ -f "${EDGELAB_HOME}/.claude/.credentials.json" ]]; then
+        oauth_ready="yes"
+    fi
+
+    # Always enable (on-boot auto-start). If tokens are present we also try
+    # start -- but only when OAuth credentials exist, otherwise the unit crashes.
     if [[ -n "$JARVIS_BOT_TOKEN" ]]; then
         systemctl enable claude-gateway.service --quiet
-        ok "claude-gateway enabled (token was supplied via env)."
+        if [[ "$oauth_ready" == "yes" ]]; then
+            if systemctl start claude-gateway.service 2>/dev/null; then
+                ok "claude-gateway enabled + started."
+            else
+                warn "claude-gateway enabled, but start failed -- check 'journalctl -u claude-gateway'."
+            fi
+        else
+            log "claude-gateway enabled -- will start after OAuth under edgelab."
+        fi
     else
-        log "claude-gateway NOT enabled (empty token) -- agent will enable after fill-in."
+        log "claude-gateway NOT enabled (no token)."
     fi
+
     if [[ -n "$RICHARD_BOT_TOKEN" ]]; then
         systemctl enable claude-richard.service --quiet
-        ok "claude-richard enabled (token was supplied via env)."
+        if [[ "$oauth_ready" == "yes" ]]; then
+            if systemctl start claude-richard.service 2>/dev/null; then
+                ok "claude-richard enabled + started."
+            else
+                warn "claude-richard enabled, but start failed -- check 'journalctl -u claude-richard'."
+            fi
+        else
+            log "claude-richard enabled -- will start after OAuth under edgelab."
+        fi
     else
-        log "claude-richard NOT enabled (empty token) -- agent will enable after fill-in."
+        log "claude-richard NOT enabled (no token)."
     fi
 }
 
@@ -1107,47 +1155,35 @@ $(printf '%b' "$C_BOLD")Tokens filled during install:$(printf '%b' "$C_NC") ${to
 
 $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not the student:$(printf '%b' "$C_NC")
 
-  $(printf '%b' "$C_YELLOW")1.$(printf '%b' "$C_NC") Student creates TWO Telegram bots in @BotFather (Jarvis + Richard)
-      and gets their numeric user ID from @userinfobot. Then the student
-      tells the root-Claude agent (in Cursor / web console / Telegram):
-
-        "Jarvis token: <...>, Richard token: <...>, my ID: <...>"
-
-  $(printf '%b' "$C_YELLOW")2.$(printf '%b' "$C_NC") Root-Claude writes the tokens into config files:
-
-        ${EDGELAB_HOME}/${JARVIS_DIR_NAME}/secrets/bot-token   (Jarvis token)
-        ${EDGELAB_HOME}/${JARVIS_DIR_NAME}/config.json         (allowlist_user_ids = [<id>])
-        ${RICHARD_HOME}/.env                                    (TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>)
-
-      Keep 0600 ownership: chown ${EDGELAB_USER}:${EDGELAB_USER} and chmod 0600.
-
-  $(printf '%b' "$C_YELLOW")3.$(printf '%b' "$C_NC") One-time Anthropic OAuth (must be interactive -- student opens browser):
+  $(printf '%b' "$C_YELLOW")1.$(printf '%b' "$C_NC") One-time Anthropic OAuth under edgelab (interactive -- opens browser):
 
         sudo -u ${EDGELAB_USER} -i bash -lc 'claude login'
 
       Credentials land in ${EDGELAB_HOME}/.claude/ and are shared by both agents.
 
-  $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Enable + start both services (installer skipped enable to avoid
-      crash-loops with empty tokens):
+  $(printf '%b' "$C_YELLOW")2.$(printf '%b' "$C_NC") If tokens were skipped during install, fill them now and restart:
 
-        sudo systemctl enable claude-gateway claude-richard
-        sudo systemctl start  claude-gateway claude-richard
-        sudo systemctl status claude-gateway claude-richard --no-pager
+        # Jarvis: edit ${EDGELAB_HOME}/${JARVIS_DIR_NAME}/config.json --
+        # set agents.jarvis.bot_token and allowed_user_ids=[<your id>]
+        # Richard: ${RICHARD_HOME}/.env -- TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>
 
-  $(printf '%b' "$C_YELLOW")5.$(printf '%b' "$C_NC") Smoke-checks (run AFTER step 4):
+        sudo systemctl restart claude-gateway claude-richard
+        sudo systemctl status  claude-gateway claude-richard --no-pager
+
+  $(printf '%b' "$C_YELLOW")3.$(printf '%b' "$C_NC") Smoke-checks:
 
         id ${EDGELAB_USER}                                      # uid >= 1000
         node -v                                                 # v22.x
         python3 --version                                       # 3.12+
         sudo -u ${EDGELAB_USER} bash -lc 'which claude'         # ${EDGELAB_HOME}/.local/bin/claude
         ls ${EDGELAB_HOME}/.claude-lab/jarvis/.claude/          # CLAUDE.md, core/, skills/
-        systemctl is-active claude-gateway                      # active (after step 4)
-        systemctl is-active claude-richard                      # active (after step 4)
+        systemctl is-active claude-gateway                      # active (after steps 1+2)
+        systemctl is-active claude-richard                      # active (after steps 1+2)
         ls -la /etc/sudoers.d/edgelab-agents                    # exists, 0440
         ls ${EDGELAB_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # 10
         ls ${EDGELAB_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
 
-  $(printf '%b' "$C_YELLOW")6.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
+  $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
       If Jarvis dies, the student messages Richard:  ${richard_label}
 
 EOF
