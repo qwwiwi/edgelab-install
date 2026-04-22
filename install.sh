@@ -31,7 +31,7 @@ set -euo pipefail
 # CONSTANTS
 # =============================================================================
 
-readonly EDGELAB_VERSION="3.0.2"
+readonly EDGELAB_VERSION="3.0.3"
 readonly JARVIS_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly JARVIS_DIR_NAME="claude-gateway"
 readonly RICHARD_REPO_SPEC="git+https://github.com/RichardAtCT/claude-code-telegram@v1.6.0"
@@ -430,7 +430,8 @@ install_apt_deps() {
         curl wget git jq rsync \
         build-essential \
         systemd \
-        logrotate
+        logrotate \
+        cron
 
     # Python 3.12: native on Ubuntu 24.04. On 22.04 we need deadsnakes PPA
     # because the default python3 is 3.10 and Day 1 promises "Python 3.12+".
@@ -1094,11 +1095,119 @@ SUDOERS
 }
 
 # =============================================================================
-# STEP 12: SYSTEMD ENABLE (do not start yet -- OAuth + tokens required first)
+# STEP 12: MEMORY ROTATION SCRIPTS + CRON
+# =============================================================================
+
+# Install the 5 memory-rotation scripts into the jarvis workspace and register
+# them with edgelab's crontab. Matches the Day 2 self-diagnostic contract: a
+# healthy agent has rotate-warm / trim-hot / compress-warm / ov-session-sync /
+# memory-rotate on cron.
+install_memory_cron() {
+    step 12 "Installing memory-rotation scripts + cron"
+
+    local scripts_src
+    if [[ -d "${INSTALLER_ROOT}/scripts" ]]; then
+        scripts_src="${INSTALLER_ROOT}/scripts"
+    else
+        warn "scripts/ directory missing at ${INSTALLER_ROOT} -- memory cron skipped."
+        return 0
+    fi
+
+    local scripts_dst="${EDGELAB_HOME}/.claude-lab/jarvis/scripts"
+    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$scripts_dst"
+
+    local logs_dst="${EDGELAB_HOME}/.claude-lab/jarvis/logs"
+    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$logs_dst"
+
+    local name
+    local installed=()
+    local required=(trim-hot rotate-warm compress-warm ov-session-sync memory-rotate)
+    for name in "${required[@]}"; do
+        local src="${scripts_src}/${name}.sh"
+        if [[ ! -f "$src" ]]; then
+            # Day-2 self-diagnostic requires all 5 jobs on cron. A partial
+            # install would leave dead cron entries pointing at missing files
+            # -- fail loud so the student doesn't ship a half-wired workspace.
+            err "Memory script '${name}.sh' missing at ${src} -- refusing partial install."
+            return 1
+        fi
+        install -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$src" "${scripts_dst}/${name}.sh"
+        installed+=("$name")
+    done
+
+    # Ensure cron service is enabled + running. On minimal Ubuntu images
+    # (LXC, cloud) the cron package is installed but not auto-started.
+    systemctl enable --now cron 2>/dev/null \
+        || warn "cron service not started -- memory rotation will run after next reboot."
+
+    # Merge cron lines with edgelab's existing crontab without clobbering it.
+    # Marker lets us update on reinstall instead of duplicating entries.
+    local marker="# edgelab-install v${EDGELAB_VERSION}: memory rotation"
+    local cron_block
+    # CRON_TZ pins the schedule to UTC so the Day-2 diagnostic contract
+    # (04:30/05:00/06:00/06:30/21:00 UTC) fires at the same wall-clock moment
+    # regardless of the host's system timezone. HOME= is set because scripts
+    # rely on $HOME under `set -u`; on some minimal images cron does not
+    # always export HOME to the user's actual home directory.
+    cron_block=$(cat <<CRON
+${marker}
+CRON_TZ=UTC
+HOME=${EDGELAB_HOME}
+30 4 * * * ${scripts_dst}/rotate-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
+0 5 * * *  ${scripts_dst}/trim-hot.sh >> ${logs_dst}/memory-cron.log 2>&1
+0 6 * * *  ${scripts_dst}/compress-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
+30 6 * * * ${scripts_dst}/ov-session-sync.sh >> ${logs_dst}/memory-cron.log 2>&1
+0 21 * * * ${scripts_dst}/memory-rotate.sh >> ${logs_dst}/memory-cron.log 2>&1
+# edgelab-install memory rotation end
+CRON
+)
+
+    local current_tmp new_tmp
+    current_tmp=$(mktemp)
+    new_tmp=$(mktemp)
+    TMPFILES+=("$current_tmp" "$new_tmp")
+
+    # Fetch current crontab (empty is fine on first run).
+    crontab -u "$EDGELAB_USER" -l 2>/dev/null > "$current_tmp" || true
+
+    # Strip any previous managed block so we can re-insert the current one.
+    python3 - "$current_tmp" "$new_tmp" <<'PY'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding='utf-8') as f:
+    text = f.read()
+cleaned = re.sub(
+    r'# edgelab-install v[0-9.]+: memory rotation.*?# edgelab-install memory rotation end\n?',
+    '',
+    text,
+    flags=re.DOTALL,
+)
+open(dst, 'w', encoding='utf-8').write(cleaned.rstrip() + ('\n' if cleaned.strip() else ''))
+PY
+
+    # Append new block.
+    printf '%s\n' "$cron_block" >> "$new_tmp"
+
+    if ! crontab -u "$EDGELAB_USER" "$new_tmp" 2>/dev/null; then
+        err "Failed to install crontab for ${EDGELAB_USER} -- memory rotation will not run. Day-2 self-diagnostic will flag this as a failure."
+        return 1
+    fi
+
+    # Verify the block actually landed so a silent crontab discard doesn't slip through.
+    if ! crontab -u "$EDGELAB_USER" -l 2>/dev/null | grep -q "edgelab-install memory rotation end"; then
+        err "crontab accepted the file but memory-rotation block is not visible on read-back."
+        return 1
+    fi
+
+    ok "Memory cron installed: ${installed[*]}"
+}
+
+# =============================================================================
+# STEP 13: SYSTEMD ENABLE (do not start yet -- OAuth + tokens required first)
 # =============================================================================
 
 enable_services() {
-    step 12 "Enabling systemd services (and starting if OAuth is already set up)"
+    step 13 "Enabling systemd services (and starting if OAuth is already set up)"
 
     systemctl daemon-reload
 
@@ -1224,6 +1333,7 @@ main() {
     install_skills
     install_superpowers
     install_sudoers
+    install_memory_cron
     enable_services
     final_instructions
 }
