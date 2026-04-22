@@ -31,7 +31,7 @@ set -euo pipefail
 # CONSTANTS
 # =============================================================================
 
-readonly EDGELAB_VERSION="3.0.1"
+readonly EDGELAB_VERSION="3.0.2"
 readonly JARVIS_REPO="https://github.com/qwwiwi/jarvis-telegram-gateway.git"
 readonly JARVIS_DIR_NAME="claude-gateway"
 readonly RICHARD_REPO_SPEC="git+https://github.com/RichardAtCT/claude-code-telegram@v1.6.0"
@@ -897,6 +897,23 @@ SJEOF
         TMPFILES+=("$tmp")
         echo '{"mcpServers": {}}' > "$tmp"
         write_as_user "$tmp" "$mcp_json" 0644
+    fi
+
+    # Global CLAUDE.md -- loaded by every Claude Code session under edgelab user.
+    # Shared by Jarvis (chat agent) and Richard (server-doctor) so Richard is
+    # not blind about the owner, language, and safety rules.
+    local global_claude_md="${claude_dir}/CLAUDE.md"
+    if [[ ! -f "$global_claude_md" ]]; then
+        local tmp
+        tmp=$(mktemp)
+        TMPFILES+=("$tmp")
+        render_template "${TEMPLATES_DIR}/global-CLAUDE.md" "$tmp" \
+            USER       "$EDGELAB_USER" \
+            USER_NAME  "$OPERATOR_NAME" \
+            TG_ID      "$TG_USER_ID" \
+            LANGUAGE   "$OPERATOR_LANGUAGE" \
+            TIMEZONE   "$OPERATOR_TIMEZONE"
+        write_as_user "$tmp" "$global_claude_md" 0644
     fi
 
     fix_owner "$claude_dir"
